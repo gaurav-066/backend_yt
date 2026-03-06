@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: vybzz-yt
+    runtime: node
+    buildCommand: npm install && pip install yt-dlp
+    startCommand: node index.js
+    plan: free
