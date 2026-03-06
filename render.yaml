@@ -1,8 +1,0 @@
-services:
-  - type: web
-      name: backend-yt-docker
-          runtime: docker
-              envVars:
-                    - key: PORT
-                            value: 3000
-                            
