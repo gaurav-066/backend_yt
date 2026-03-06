@@ -5,3 +5,4 @@ services:
               envVars:
                     - key: PORT
                             value: 3000
+                            
