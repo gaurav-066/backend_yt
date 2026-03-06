@@ -15,7 +15,7 @@ if (process.env.YT_COOKIES) {
 
 // Pre-download EJS solver at startup so it doesn't download every request
 try {
-    execSync(`yt-dlp --remote-components ejs:github --update-to nightly 2>&1 || true`, { timeout: 60000 });
+    execSync(`yt-dlp --remote-components ejs:github "https://youtube.com/watch?v=dQw4w9WgXcQ" --skip-download 2>&1 || true`, { timeout: 60000 });
     console.log('yt-dlp updated and EJS components cached.');
 } catch(e) { console.log('EJS pre-cache skipped:', e.message); }
 
