@@ -6,42 +6,41 @@ const app = express();
 app.use(cors());
 
 app.get('/', (req, res) => {
-      res.json({ status: 'ok', service: 'vybzz-yt-backend' });
+          res.json({ status: 'ok', service: 'vybzz-yt-backend' });
 });
 
 app.get('/search', (req, res) => {
-      const query = req.query.q;
-      if (!query) return res.status(400).json({ error: 'No query' });
+          const query = req.query.q;
+          if (!query) return res.status(400).json({ error: 'No query' });
 
-          // Sanitize: remove shell-dangerous characters
-          const safe = query.replace(/[;"'`$\\|&<>]/g, '');
-      const cmd = `yt-dlp "ytsearch1:${safe}" --get-id --get-title --get-duration --no-playlist -q`;
-      exec(cmd, { timeout: 30000 }, (err, stdout, stderr) => {
-              if (err) return res.status(500).json({ error: 'Search failed', details: err.message, stderr: stderr });
-              if (!stdout || !stdout.trim()) return res.json({ results: [] });
-              const lines = stdout.trim().split('\n');
-              const results = [];
-              for (let i = 0; i < lines.length - 2; i += 3) {
-                        results.push({
-                                    title: lines[i],
-                                    videoId: lines[i + 1],
-                                    duration: lines[i + 2]
-                        });
-              }
-              res.json({ results });
-      });
+            const safe = query.replace(/[;"'`$\\|&<>]/g, '');
+          const cmd = `yt-dlp "ytsearch1:${safe}" --get-id --get-title --get-duration --no-playlist -q --extractor-args "youtube:player_client=mediaconnect"`;
+          exec(cmd, { timeout: 30000 }, (err, stdout, stderr) => {
+                        if (err) return res.status(500).json({ error: 'Search failed', details: err.message, stderr: stderr });
+                        if (!stdout || !stdout.trim()) return res.json({ results: [] });
+                        const lines = stdout.trim().split('\n');
+                        const results = [];
+                        for (let i = 0; i < lines.length - 2; i += 3) {
+                                          results.push({
+                                                                title: lines[i],
+                                                                videoId: lines[i + 1],
+                                                                duration: lines[i + 2]
+                                          });
+                        }
+                        res.json({ results });
+          });
 });
 
 app.get('/stream', (req, res) => {
-      const id = req.query.id;
-      if (!id || !/^[a-zA-Z0-9_-]{11}$/.test(id)) return res.status(400).json({ error: 'Invalid id' });
+          const id = req.query.id;
+          if (!id || !/^[a-zA-Z0-9_-]{11}$/.test(id)) return res.status(400).json({ error: 'Invalid id' });
 
-          const cmd = `yt-dlp "https://youtube.com/watch?v=${id}" -f bestaudio -g`;
-      exec(cmd, { timeout: 30000 }, (err, stdout, stderr) => {
-              if (err) return res.status(500).json({ error: 'Stream failed', details: err.message, stderr: stderr });
-              res.json({ url: stdout.trim() });
-      });
+            const cmd = `yt-dlp "https://youtube.com/watch?v=${id}" -f bestaudio -g --extractor-args "youtube:player_client=mediaconnect"`;
+          exec(cmd, { timeout: 30000 }, (err, stdout, stderr) => {
+                        if (err) return res.status(500).json({ error: 'Stream failed', details: err.message, stderr: stderr });
+                        if (!stdout || !stdout.trim()) return res.status(404).json({ error: 'No stream' });
+                        res.json({ url: stdout.trim() });
+          });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+app.listen(process.env.PORT || 3000);
