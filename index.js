@@ -119,8 +119,8 @@ app.get('/play', async (req, res) => {
         // Search YouTube + extract best audio format info as JSON
         const raw = await ytdlp([
             `ytsearch1:${query}`,
-            '-f', 'bestaudio[ext=m4a]/bestaudio',
-            '-j'   // dump full info as JSON
+            '-f', 'bestaudio',
+            '-j'
         ]);
 
         const info = JSON.parse(raw);
@@ -172,7 +172,7 @@ app.get('/video', async (req, res) => {
     try {
         const raw = await ytdlp([
             `ytsearch1:${query}`,
-            '-f', 'best[height<=480][ext=mp4]/best[height<=480]/best[ext=mp4]',
+            '-f', 'best[height<=480]/best',
             '-j'
         ]);
 
