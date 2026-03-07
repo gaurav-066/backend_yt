@@ -33,7 +33,7 @@ if (process.env.YT_COOKIES) {
                         value: parts[6].replace(/\r$/, '')
                     };
                 })
-                .filter(c => c !== null);
+                .filter(c => c !== null && c.domain.includes('youtube.com'));
         }
 
         ytdlAgent = ytdl.createAgent(cookies);
