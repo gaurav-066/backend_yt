@@ -77,7 +77,7 @@ function ytdlp(args) {
             '--no-warnings',
             '--no-check-certificates',
             '--no-playlist',
-            '--extractor-args', 'youtube:player_client=default',
+            '--remote-components', 'ejs:github',
             ...args
         ];
 
