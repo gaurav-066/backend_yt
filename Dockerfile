@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install yt-dlp
+# Install yt-dlp with --break-system-packages for newer Python
 RUN pip3 install --break-system-packages yt-dlp
 
 WORKDIR /app
@@ -17,7 +17,6 @@ RUN npm install --production
 
 COPY . .
 
-# Set environment variables for memory management
 ENV NODE_OPTIONS="--max-old-space-size=400"
 
 EXPOSE 3000
