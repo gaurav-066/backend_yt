@@ -5,13 +5,13 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
-// Limit concurrent processes to avoid OOM
 let activeProcesses = 0;
 const MAX_CONCURRENT = 2;
-const MAX_VIDEO_DURATION = 420; // 7 minutes - skip video for longer songs
+const MAX_VIDEO_DURATION = 420; // 7 minutes
 
 /**
- * Extract info using yt-dlp with OOM protections
+ * Extract info using yt-dlp.
+ * Uses --extractor-args "youtube:player_client=android" to bypass bot detection.
  */
 function ytdlpExtract(query, format) {
     return new Promise((resolve, reject) => {
@@ -21,11 +21,20 @@ function ytdlpExtract(query, format) {
 
         activeProcesses++;
 
-        // Use --print for structured output and --get-url for the stream URL
-        // Do NOT use --flat-playlist with --get-url (they conflict)
-        const command = `yt-dlp --no-playlist --quiet --no-warnings -f "${format}" --print "%(title)s" --print "%(id)s" --print "%(duration)s" --get-url "ytsearch1:${query}"`;
+        // android player client bypasses the "Sign in to confirm" bot check
+        const command = `yt-dlp \
+            --no-playlist \
+            --quiet \
+            --no-warnings \
+            --extractor-args "youtube:player_client=android" \
+            -f "${format}" \
+            --print "%(title)s" \
+            --print "%(id)s" \
+            --print "%(duration)s" \
+            --get-url \
+            "ytsearch1:${query}"`;
 
-        exec(command, { timeout: 25000 }, (error, stdout, stderr) => {
+        exec(command, { timeout: 30000 }, (error, stdout, stderr) => {
             activeProcesses--;
 
             if (error) {
@@ -35,65 +44,55 @@ function ytdlpExtract(query, format) {
 
             const lines = stdout.trim().split('\n').filter(l => l.length > 0);
 
-            // For combined formats: [Title, ID, Duration, URL]
-            // For separate video+audio: [Title, ID, Duration, VideoURL, AudioURL]
+            // Expected: [Title, ID, Duration, URL]
             if (lines.length >= 4) {
                 const duration = parseInt(lines[2]) || 0;
-                // Get the first URL that starts with http (stream URL)
+                // Find the first real stream URL
                 const url = lines.slice(3).find(l => l.startsWith('http'));
                 if (url) {
-                    resolve({ title: lines[0], videoId: lines[1], duration, url });
-                } else {
-                    reject(new Error('No stream URL found'));
+                    return resolve({ title: lines[0], videoId: lines[1], duration, url });
                 }
-            } else {
-                reject(new Error('Unexpected yt-dlp output'));
             }
+            reject(new Error('Could not parse yt-dlp output: ' + lines.join(' | ')));
         });
     });
 }
 
-// ENDPOINT: Audio Search (Fallback for JioSaavn)
+// ENDPOINT: Audio fallback
 app.get('/play', async (req, res) => {
     const query = req.query.q;
     if (!query) return res.status(400).json({ error: 'Query required' });
 
     try {
-        // bestaudio only - single stream, low memory
-        const result = await ytdlpExtract(query, "bestaudio[ext=m4a]/bestaudio/best");
+        const result = await ytdlpExtract(query, 'bestaudio[ext=m4a]/bestaudio/best');
         res.json(result);
     } catch (err) {
-        const code = err.message === 'Server busy' ? 503 : 500;
-        res.status(code).json({ error: err.message });
+        res.status(err.message === 'Server busy' ? 503 : 500).json({ error: err.message });
     }
 });
 
-// ENDPOINT: Video Background (Smart loop)
-// Uses a SINGLE combined stream (best[height<=360]) to avoid muxing issues
+// ENDPOINT: Video background (returns duration for smart 2-min middle loop)
 app.get('/video', async (req, res) => {
     const query = req.query.q;
     if (!query) return res.status(400).json({ error: 'Query required' });
 
     try {
-        // IMPORTANT: Use "best[height<=360]" not "bestvideo+bestaudio"
-        // Combined format gives us ONE direct URL that browsers can play directly
-        const result = await ytdlpExtract(query, "best[height<=360]/best[height<=480]/best");
+        // Single combined stream (video+audio) so browser can play directly
+        const result = await ytdlpExtract(query, 'best[height<=360]/best[height<=480]/best');
 
-        // Skip videos that are too long (prevent OOM on subsequent requests)
         if (result.duration > MAX_VIDEO_DURATION) {
-            console.log(`Skipping video: "${query}" too long (${result.duration}s)`);
+            console.log(`Skipping: "${query}" too long (${result.duration}s)`);
             return res.status(204).end();
         }
 
         res.json(result);
     } catch (err) {
-        const code = err.message === 'Server busy' ? 503 : 500;
-        res.status(code).json({ error: err.message });
+        res.status(err.message === 'Server busy' ? 503 : 500).json({ error: err.message });
     }
 });
 
 app.get('/', (req, res) => {
-    res.send('VYBZZ YouTube Backend (v2.1 - Smart Loop + OOM Protection)');
+    res.send('VYBZZ YouTube Backend (v2.2 - yt-dlp android client)');
 });
 
 const PORT = process.env.PORT || 3000;
