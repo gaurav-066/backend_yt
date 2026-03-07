@@ -11,13 +11,35 @@ app.use(cors());
 let ytdlAgent = null;
 if (process.env.YT_COOKIES) {
     try {
-        // ytdl-core expects cookies in an array format or parsed string
-        // We use createAgent to inject them
-        const cookies = JSON.parse(process.env.YT_COOKIES);
+        let cookies = [];
+        const rawCookies = process.env.YT_COOKIES.trim();
+
+        if (rawCookies.startsWith('[')) {
+            // Parse as JSON array
+            cookies = JSON.parse(rawCookies);
+        } else {
+            // Parse as Netscape HTTP Cookie File string
+            cookies = rawCookies.split('\n')
+                .filter(line => line && !line.trim().startsWith('#'))
+                .map(line => {
+                    const parts = line.split('\t');
+                    if (parts.length < 7) return null;
+                    return {
+                        domain: parts[0],
+                        path: parts[2],
+                        secure: parts[3] === 'TRUE',
+                        expirationDate: parseInt(parts[4], 10) || 0,
+                        name: parts[5],
+                        value: parts[6].replace(/\r$/, '')
+                    };
+                })
+                .filter(c => c !== null);
+        }
+
         ytdlAgent = ytdl.createAgent(cookies);
-        console.log('✅ YT Cookies loaded from ENV!');
+        console.log(`✅ YT Cookies loaded from ENV! (${cookies.length} parsed)`);
     } catch (e) {
-        console.warn('⚠️ YT_COOKIES env var exists but failed to parse (needs to be valid JSON array):', e.message);
+        console.warn('⚠️ YT_COOKIES env var exists but failed to parse:', e.message);
     }
 } else {
     console.warn('⚠️ No YT_COOKIES env var found. Proceeding without authentication.');
