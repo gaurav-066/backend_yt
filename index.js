@@ -1,129 +1,310 @@
 const express = require('express');
-const { exec, execSync } = require('child_process');
 const cors = require('cors');
+const { execFile } = require('child_process');
+const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
 app.use(cors());
 
-// --- COOKIE SETUP ---
-const COOKIE_FILE = path.join(__dirname, 'cookies.txt');
-let hasCookies = false;
+// ─── CONFIG ─────────────────────────────────────────
+const MAX_CONCURRENT = 2;
+const MAX_VIDEO_DURATION = 420;  // 7 minutes max for background video
+const CACHE_TTL = 3 * 60 * 60 * 1000;  // 3 hours (YouTube URLs expire ~6h)
+const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
 
+// ─── COOKIE SETUP ───────────────────────────────────
 if (process.env.YT_COOKIES) {
     try {
-        // yt-dlp is very smart at parsing Netscape format directly.
-        // We write the raw string from ENV to a local file.
-        fs.writeFileSync(COOKIE_FILE, process.env.YT_COOKIES);
-        hasCookies = true;
-        console.log('✅ cookies.txt generated from YT_COOKIES');
-    } catch (err) {
-        console.error('⚠️ Failed to write cookies.txt:', err.message);
+        fs.writeFileSync(COOKIES_FILE, process.env.YT_COOKIES);
+        console.log('✅ Cookies written to cookies.txt');
+    } catch (e) {
+        console.warn('⚠️ Failed to write cookies:', e.message);
     }
 } else {
-    console.warn('⚠️ No YT_COOKIES env var found.');
+    console.log('ℹ️  No YT_COOKIES env var — running without cookies');
 }
 
-// Pre-cache EJS (Embedded JS) components for signature solving
-try {
-    console.log('🔄 Pre-caching yt-dlp EJS components...');
-    // We run a dummy call to trigger the download/update of remote components
-    execSync(`yt-dlp --remote-components ejs:github "https://youtube.com/watch?v=dQw4w9WgXcQ" --skip-download 2>&1 || true`, { timeout: 60000 });
-    console.log('✅ EJS components ready.');
-} catch (e) {
-    console.log('⚠️ EJS cache skip:', e.message);
-}
+// ─── VERIFY YT-DLP ON STARTUP ──────────────────────
+execFile('yt-dlp', ['--version'], { timeout: 5000 }, (err, stdout) => {
+    if (err) {
+        console.error('❌ yt-dlp is NOT installed or not in PATH!');
+    } else {
+        console.log('✅ yt-dlp version:', stdout.trim());
+    }
+});
 
-let activeProcesses = 0;
-const MAX_CONCURRENT = 2; // Keep at 2 to stay within 512MB RAM
-const MAX_VIDEO_DURATION = 420; // 7 minutes
+// ─── STREAM URL CACHE ──────────────────────────────
+// Key: "videoId:audio" or "videoId:video"  →  Value: { url, ts }
+const urlCache = new Map();
 
-function ytdlpExtract(query, format) {
-    return new Promise((resolve, reject) => {
-        if (activeProcesses >= MAX_CONCURRENT) {
-            return reject(new Error('Server busy'));
+function cacheUrl(key, url) {
+    urlCache.set(key, { url, ts: Date.now() });
+    // Prevent unbounded growth
+    if (urlCache.size > 200) {
+        const now = Date.now();
+        for (const [k, v] of urlCache) {
+            if (now - v.ts > CACHE_TTL) urlCache.delete(k);
         }
+    }
+}
 
-        activeProcesses++;
+function getCachedUrl(key) {
+    const entry = urlCache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.ts > CACHE_TTL) {
+        urlCache.delete(key);
+        return null;
+    }
+    return entry.url;
+}
 
-        const cookieArg = hasCookies ? `--cookies "${COOKIE_FILE}"` : '';
-        // --remote-components ejs:github solves the "Precondition check failed" / po-token issue
-        const command = `yt-dlp \
-            --no-playlist \
-            --quiet \
-            --no-warnings \
-            ${cookieArg} \
-            --remote-components ejs:github \
-            -f "${format}" \
-            --print "%(title)s" \
-            --print "%(id)s" \
-            --print "%(duration)s" \
-            --get-url \
-            "ytsearch1:${query}"`;
+// ─── CONCURRENCY GUARD ─────────────────────────────
+let active = 0;
 
-        exec(command, { timeout: 45000 }, (error, stdout, stderr) => {
-            activeProcesses--;
+// ─── YT-DLP WRAPPER ────────────────────────────────
+function ytdlp(args) {
+    return new Promise((resolve, reject) => {
+        const cookieArgs = fs.existsSync(COOKIES_FILE)
+            ? ['--cookies', COOKIES_FILE]
+            : [];
 
-            if (error) {
-                console.error(`yt-dlp error for "${query}": ${stderr}`);
-                return reject(error);
+        const allArgs = [
+            ...cookieArgs,
+            '--no-warnings',
+            '--no-check-certificates',
+            '--no-playlist',
+            '--extractor-args', 'youtube:player_client=default',
+            ...args
+        ];
+
+        console.log(`[yt-dlp] Running: yt-dlp ${args.join(' ')}`);
+        const startTime = Date.now();
+
+        execFile('yt-dlp', allArgs, {
+            timeout: 40000,   // 40 seconds max
+            maxBuffer: 2 * 1024 * 1024,
+            env: { ...process.env, PYTHONUNBUFFERED: '1' }
+        }, (err, stdout, stderr) => {
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+            if (err) {
+                // Extract the most useful error line
+                const lines = (stderr || err.message || '').split('\n');
+                const errorLine = lines.find(l => l.includes('ERROR')) || lines[0] || err.message;
+                console.error(`[yt-dlp] Failed in ${elapsed}s: ${errorLine}`);
+                reject(new Error(errorLine));
+            } else {
+                console.log(`[yt-dlp] Done in ${elapsed}s (${stdout.length} bytes)`);
+                resolve(stdout.trim());
             }
-
-            const lines = stdout.trim().split('\n').filter(l => l.length > 0);
-
-            // Output order: [Title, ID, Duration, URL]
-            if (lines.length >= 4) {
-                const duration = parseInt(lines[2]) || 0;
-                const url = lines.slice(3).find(l => l.startsWith('http'));
-                if (url) {
-                    return resolve({ title: lines[0], videoId: lines[1], duration, url });
-                }
-            }
-            reject(new Error('Format search failed or no URL found.'));
         });
     });
 }
 
-// ENDPOINT: Audio (Fallback for JioSaavn)
+// ─── /play ENDPOINT ────────────────────────────────
+// Searches YouTube, extracts the best audio URL, caches it,
+// and returns a proxy stream URL to the browser.
 app.get('/play', async (req, res) => {
     const query = req.query.q;
     if (!query) return res.status(400).json({ error: 'Query required' });
+    if (active >= MAX_CONCURRENT) {
+        return res.status(503).json({ error: 'Server busy, try again in a few seconds' });
+    }
 
+    active++;
     try {
-        const result = await ytdlpExtract(query, "bestaudio[ext=m4a]/bestaudio/best");
-        res.json(result);
+        // Search YouTube + extract best audio format info as JSON
+        const raw = await ytdlp([
+            `ytsearch1:${query}`,
+            '-f', 'bestaudio[ext=m4a]/bestaudio',
+            '-j'   // dump full info as JSON
+        ]);
+
+        const info = JSON.parse(raw);
+        const videoId = info.id;
+
+        // Get the direct stream URL (may be at top level or in requested_formats)
+        const streamUrl = info.url
+            || (info.requested_formats && info.requested_formats[0] && info.requested_formats[0].url);
+
+        if (!streamUrl) {
+            throw new Error('yt-dlp returned no audio stream URL');
+        }
+
+        // Cache the real YouTube URL (only Render's IP can use it)
+        const cacheKey = `${videoId}:audio`;
+        cacheUrl(cacheKey, streamUrl);
+
+        // Build our proxy URL that the browser will actually use
+        const host = `https://${req.get('host')}`;
+
+        res.json({
+            videoId,
+            title: info.title || query,
+            artist: info.channel || info.uploader || '',
+            duration: info.duration || 0,
+            thumbnail: info.thumbnail || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+            url: `${host}/stream/${videoId}?t=audio`
+        });
+
     } catch (err) {
-        res.status(err.message === 'Server busy' ? 503 : 500).json({ error: err.message });
+        console.error('/play error:', err.message);
+        res.status(500).json({ error: err.message });
+    } finally {
+        active--;
     }
 });
 
-// ENDPOINT: Video Background
+// ─── /video ENDPOINT ───────────────────────────────
+// Same as /play but picks a low-res combined video+audio format
+// for background video in the fullscreen player.
 app.get('/video', async (req, res) => {
     const query = req.query.q;
     if (!query) return res.status(400).json({ error: 'Query required' });
+    if (active >= MAX_CONCURRENT) {
+        return res.status(503).json({ error: 'Server busy, try again in a few seconds' });
+    }
 
+    active++;
     try {
-        // Combined stream (360p) for background video - single URL, browser-compatible
-        const result = await ytdlpExtract(query, "best[height<=360]/best[height<=480]/best");
+        const raw = await ytdlp([
+            `ytsearch1:${query}`,
+            '-f', 'best[height<=480][ext=mp4]/best[height<=480]/best[ext=mp4]',
+            '-j'
+        ]);
 
-        if (result.duration > MAX_VIDEO_DURATION) {
-            console.log(`Skipping: "${query}" too long (${result.duration}s)`);
+        const info = JSON.parse(raw);
+
+        // Skip videos that are too long (saves bandwidth)
+        if (info.duration && info.duration > MAX_VIDEO_DURATION) {
+            console.log(`[/video] Skipping "${query}" — too long (${info.duration}s)`);
             return res.status(204).end();
         }
 
-        res.json(result);
+        const videoId = info.id;
+        const streamUrl = info.url
+            || (info.requested_formats && info.requested_formats[0] && info.requested_formats[0].url);
+
+        if (!streamUrl) {
+            throw new Error('yt-dlp returned no video stream URL');
+        }
+
+        const cacheKey = `${videoId}:video`;
+        cacheUrl(cacheKey, streamUrl);
+
+        const host = `https://${req.get('host')}`;
+
+        res.json({
+            videoId,
+            title: info.title || query,
+            duration: info.duration || 0,
+            url: `${host}/stream/${videoId}?t=video`
+        });
+
     } catch (err) {
-        res.status(err.message === 'Server busy' ? 503 : 500).json({ error: err.message });
+        console.error('/video error:', err.message);
+        res.status(500).json({ error: err.message });
+    } finally {
+        active--;
     }
 });
 
-app.get('/', (req, res) => {
-    const status = hasCookies ? '(Cookies Active 🍪)' : '(No Cookies)';
-    res.send(`VYBZZ YouTube Backend (v6.0 - yt-dlp + EJS Solver + Cookies) ${status}`);
+// ─── /stream/:videoId ENDPOINT (Pipe Proxy) ────────
+// This is the magic: Render fetches from googlevideo.com (same IP
+// that extracted the URL) and pipes it straight to the browser.
+// Zero buffering, zero RAM usage — just a passthrough.
+// Supports HTTP Range requests so seeking works in the player.
+app.get('/stream/:videoId', (req, res) => {
+    const { videoId } = req.params;
+    const type = req.query.t || 'audio';
+    const cacheKey = `${videoId}:${type}`;
+
+    const sourceUrl = getCachedUrl(cacheKey);
+    if (!sourceUrl) {
+        return res.status(410).json({
+            error: 'Stream expired or not found — the app will re-search automatically'
+        });
+    }
+
+    try {
+        const parsed = new URL(sourceUrl);
+        const client = parsed.protocol === 'https:' ? https : http;
+
+        // Build request headers
+        const reqHeaders = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        };
+
+        // Forward Range header — essential for seeking in <audio>/<video>
+        if (req.headers.range) {
+            reqHeaders['Range'] = req.headers.range;
+        }
+
+        const options = {
+            hostname: parsed.hostname,
+            port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+            path: parsed.pathname + parsed.search,
+            headers: reqHeaders
+        };
+
+        const upstream = client.get(options, (ytRes) => {
+            // Forward status: 200 = full file, 206 = partial (seek)
+            res.status(ytRes.statusCode);
+
+            // Forward headers the browser needs for playback
+            const headersToForward = [
+                'content-type',
+                'content-length',
+                'content-range',
+                'accept-ranges'
+            ];
+            headersToForward.forEach(h => {
+                if (ytRes.headers[h]) res.setHeader(h, ytRes.headers[h]);
+            });
+
+            // Allow CORS on the stream itself
+            res.setHeader('Access-Control-Allow-Origin', '*');
+
+            // Pipe: YouTube → Render → Browser (zero buffering)
+            ytRes.pipe(res);
+
+            ytRes.on('error', () => {
+                try { res.end(); } catch (e) { /* already closed */ }
+            });
+        });
+
+        upstream.on('error', (err) => {
+            console.error(`[stream] Upstream error for ${cacheKey}:`, err.message);
+            if (!res.headersSent) {
+                res.status(502).json({ error: 'YouTube stream failed — try again' });
+            }
+        });
+
+        // Clean up if the browser disconnects mid-stream
+        res.on('close', () => {
+            try { upstream.destroy(); } catch (e) { /* already destroyed */ }
+        });
+
+    } catch (err) {
+        console.error('[stream] Error:', err.message);
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Internal stream error' });
+        }
+    }
 });
 
+// ─── HEALTH CHECK ──────────────────────────────────
+app.get('/', (req, res) => {
+    const cookies = fs.existsSync(COOKIES_FILE) ? '🍪' : '❌';
+    const cached = urlCache.size;
+    res.send(`VYBZZ YT Backend v5.0 | yt-dlp + pipe proxy | Cookies: ${cookies} | Cached: ${cached} | Load: ${active}/${MAX_CONCURRENT}`);
+});
+
+// ─── START SERVER ──────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`🚀 VYBZZ Backend v5.0 running on port ${PORT}`);
 });

@@ -1,13 +1,13 @@
 {
     "name": "vybzz-backend-yt",
     "version": "5.0.0",
-    "description": "YouTube URL extractor for VYBZZ - yt-dlp with cookies support",
+    "description": "VYBZZ YouTube backend — yt-dlp search + pipe proxy streaming",
     "main": "index.js",
     "scripts": {
         "start": "node index.js"
     },
     "dependencies": {
-        "express": "^4.18.2",
-        "cors": "^2.8.5"
+        "cors": "^2.8.5",
+        "express": "^4.18.2"
     }
 }
