@@ -1,19 +1,25 @@
-FROM nikolaik/python-nodejs:python3.11-nodejs20
+FROM node:18-slim
 
-RUN apt-get update && apt-get install -y ffmpeg curl unzip
+# Install python and ffmpeg for yt-dlp
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Deno (yt-dlp needs this for YouTube signature solving)
-RUN curl -fsSL https://deno.land/install.sh | sh
-ENV DENO_DIR="/root/.deno"
-ENV PATH="${DENO_DIR}/bin:${PATH}"
+# Install yt-dlp
+RUN pip3 install yt-dlp
 
-# Install latest yt-dlp
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp
+WORKDIR /app
 
-WORKDIR /usr/src/app
 COPY package*.json ./
-RUN npm install
+RUN npm install --production
+
 COPY . .
 
+# Set environment variables for memory management
+ENV NODE_OPTIONS="--max-old-space-size=400"
+
 EXPOSE 3000
+
 CMD ["node", "index.js"]
