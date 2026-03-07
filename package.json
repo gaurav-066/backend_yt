@@ -1,15 +1,13 @@
 {
     "name": "vybzz-backend-yt",
-    "version": "4.0.0",
-    "description": "YouTube URL extractor for VYBZZ - using ytdl-core + concurrency limit",
+    "version": "5.0.0",
+    "description": "YouTube URL extractor for VYBZZ - yt-dlp with cookies support",
     "main": "index.js",
     "scripts": {
         "start": "node index.js"
     },
     "dependencies": {
-        "@distube/ytdl-core": "^4.16.12",
-        "cors": "^2.8.5",
         "express": "^4.18.2",
-        "yt-search": "^2.13.1"
+        "cors": "^2.8.5"
     }
 }

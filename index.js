@@ -1,140 +1,109 @@
 const express = require('express');
+const { exec } = require('child_process');
 const cors = require('cors');
-const ytdl = require('@distube/ytdl-core');
-const ytSearch = require('yt-search');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
 
-// You said you have cookies in an ENV variable on Render!
-// We parse them into the ytdl agent so it bypasses bot detection.
-let ytdlAgent = null;
+// --- COOKIE SETUP ---
+// yt-dlp reads netscape format cookies directly from a text file.
+// We write the YT_COOKIES env var to a file on server start.
+let hasCookies = false;
 if (process.env.YT_COOKIES) {
     try {
-        let cookies = [];
-        const rawCookies = process.env.YT_COOKIES.trim();
-
-        if (rawCookies.startsWith('[')) {
-            // Parse as JSON array
-            cookies = JSON.parse(rawCookies);
-        } else {
-            // Parse as Netscape HTTP Cookie File string
-            cookies = rawCookies.split('\n')
-                .filter(line => line && !line.trim().startsWith('#'))
-                .map(line => {
-                    const parts = line.split('\t');
-                    if (parts.length < 7) return null;
-                    return {
-                        domain: parts[0],
-                        path: parts[2],
-                        secure: parts[3] === 'TRUE',
-                        expirationDate: parseInt(parts[4], 10) || 0,
-                        name: parts[5],
-                        value: parts[6].replace(/\r$/, '')
-                    };
-                })
-                .filter(c => c !== null && c.domain.includes('youtube.com'));
-        }
-
-        ytdlAgent = ytdl.createAgent(cookies);
-        console.log(`✅ YT Cookies loaded from ENV! (${cookies.length} parsed)`);
-    } catch (e) {
-        console.warn('⚠️ YT_COOKIES env var exists but failed to parse:', e.message);
+        fs.writeFileSync('cookies.txt', process.env.YT_COOKIES);
+        hasCookies = true;
+        console.log('✅ cookies.txt successfully generated from YT_COOKIES env var!');
+    } catch (err) {
+        console.error('⚠️ Failed to write cookies.txt:', err.message);
     }
 } else {
-    console.warn('⚠️ No YT_COOKIES env var found. Proceeding without authentication.');
+    console.warn('⚠️ No YT_COOKIES env var found. yt-dlp will run unauthenticated.');
 }
 
-// Memory / Crash Protection
 let activeProcesses = 0;
-const MAX_CONCURRENT = 3;
+const MAX_CONCURRENT = 2; // Strict limit to prevent RAM OOM
 const MAX_VIDEO_DURATION = 420; // 7 minutes
 
+function ytdlpExtract(query, format) {
+    return new Promise((resolve, reject) => {
+        if (activeProcesses >= MAX_CONCURRENT) {
+            return reject(new Error('Server busy'));
+        }
+
+        activeProcesses++;
+
+        const cookieArg = hasCookies ? '--cookies cookies.txt' : '';
+        const command = `yt-dlp \
+            --no-playlist \
+            --quiet \
+            --no-warnings \
+            ${cookieArg} \
+            -f "${format}" \
+            --print "%(title)s" \
+            --print "%(id)s" \
+            --print "%(duration)s" \
+            --get-url \
+            "ytsearch1:${query}"`;
+
+        exec(command, { timeout: 30000 }, (error, stdout, stderr) => {
+            activeProcesses--;
+
+            if (error) {
+                console.error(`yt-dlp error for "${query}": ${stderr}`);
+                return reject(error);
+            }
+
+            const lines = stdout.trim().split('\n').filter(l => l.length > 0);
+
+            if (lines.length >= 4) {
+                const duration = parseInt(lines[2]) || 0;
+                const url = lines.slice(3).find(l => l.startsWith('http'));
+                if (url) {
+                    return resolve({ title: lines[0], videoId: lines[1], duration, url });
+                }
+            }
+            reject(new Error('Could not parse yt-dlp output: ' + lines.join(' | ')));
+        });
+    });
+}
+
+// ENDPOINT: Audio fallback
 app.get('/play', async (req, res) => {
     const query = req.query.q;
     if (!query) return res.status(400).json({ error: 'Query required' });
 
-    if (activeProcesses >= MAX_CONCURRENT) {
-        return res.status(503).json({ error: 'Server busy, retry later' });
-    }
-
-    activeProcesses++;
     try {
-        const searchResult = await ytSearch(query);
-        const videos = searchResult.videos;
-        if (!videos.length) throw new Error('No video found');
-
-        const video = videos[0];
-
-        // Pass the agent (cookies) to getInfo
-        const fetchOptions = ytdlAgent ? { agent: ytdlAgent } : {};
-        const info = await ytdl.getInfo(video.url, fetchOptions);
-
-        const audioFormat = ytdl.chooseFormat(info.formats, { quality: 'highestaudio' });
-
-        res.json({
-            videoId: video.videoId,
-            title: video.title,
-            duration: video.seconds || 0,
-            url: audioFormat.url
-        });
+        const result = await ytdlpExtract(query, 'bestaudio[ext=m4a]/bestaudio/best');
+        res.json(result);
     } catch (err) {
-        console.error('ytdl-core /play error:', err.message);
-        res.status(500).json({ error: err.message });
-    } finally {
-        activeProcesses--;
+        res.status(err.message === 'Server busy' ? 503 : 500).json({ error: err.message });
     }
 });
 
+// ENDPOINT: Video background
 app.get('/video', async (req, res) => {
     const query = req.query.q;
     if (!query) return res.status(400).json({ error: 'Query required' });
 
-    if (activeProcesses >= MAX_CONCURRENT) {
-        return res.status(503).json({ error: 'Server busy, retry later' });
-    }
-
-    activeProcesses++;
     try {
-        const searchResult = await ytSearch(query);
-        const videos = searchResult.videos;
-        if (!videos.length) throw new Error('No video found');
+        const result = await ytdlpExtract(query, 'best[height<=360]/best[height<=480]/best');
 
-        const video = videos[0];
-
-        if (video.seconds > MAX_VIDEO_DURATION) {
-            console.log(`Skipping video: "${query}" too long (${video.seconds}s)`);
-            res.status(204).end();
-            return;
+        if (result.duration > MAX_VIDEO_DURATION) {
+            console.log(`Skipping: "${query}" too long (${result.duration}s)`);
+            return res.status(204).end();
         }
 
-        // Pass the agent (cookies) to getInfo
-        const fetchOptions = ytdlAgent ? { agent: ytdlAgent } : {};
-        const info = await ytdl.getInfo(video.url, fetchOptions);
-
-        // Single combined stream for the background video (around 360p-480p)
-        const videoFormat = ytdl.chooseFormat(info.formats, {
-            quality: '18',
-            filter: 'audioandvideo'
-        });
-
-        res.json({
-            videoId: video.videoId,
-            title: video.title,
-            duration: video.seconds || 0,
-            url: videoFormat.url
-        });
+        res.json(result);
     } catch (err) {
-        console.error('ytdl-core /video error:', err.message);
-        res.status(500).json({ error: err.message });
-    } finally {
-        activeProcesses--;
+        res.status(err.message === 'Server busy' ? 503 : 500).json({ error: err.message });
     }
 });
 
 app.get('/', (req, res) => {
-    const status = ytdlAgent ? '(Cookies Active 🍪)' : '(No Cookies)';
-    res.send(`VYBZZ YouTube Backend (v4.1 - ytdl-core + OOM Guard) ${status}`);
+    const status = hasCookies ? '(Cookies Active 🍪)' : '(No Cookies)';
+    res.send(`VYBZZ YouTube Backend (v5.0 - yt-dlp + Cookies + OOM Guard) ${status}`);
 });
 
 const PORT = process.env.PORT || 3000;
