@@ -6,7 +6,24 @@ const ytSearch = require('yt-search');
 const app = express();
 app.use(cors());
 
-// Limit concurrent processes to avoid OOM with ytdl-core
+// You said you have cookies in an ENV variable on Render!
+// We parse them into the ytdl agent so it bypasses bot detection.
+let ytdlAgent = null;
+if (process.env.YT_COOKIES) {
+    try {
+        // ytdl-core expects cookies in an array format or parsed string
+        // We use createAgent to inject them
+        const cookies = JSON.parse(process.env.YT_COOKIES);
+        ytdlAgent = ytdl.createAgent(cookies);
+        console.log('✅ YT Cookies loaded from ENV!');
+    } catch (e) {
+        console.warn('⚠️ YT_COOKIES env var exists but failed to parse (needs to be valid JSON array):', e.message);
+    }
+} else {
+    console.warn('⚠️ No YT_COOKIES env var found. Proceeding without authentication.');
+}
+
+// Memory / Crash Protection
 let activeProcesses = 0;
 const MAX_CONCURRENT = 3;
 const MAX_VIDEO_DURATION = 420; // 7 minutes
@@ -26,9 +43,11 @@ app.get('/play', async (req, res) => {
         if (!videos.length) throw new Error('No video found');
 
         const video = videos[0];
-        const info = await ytdl.getInfo(video.url);
 
-        // Best audio with ytdl-core
+        // Pass the agent (cookies) to getInfo
+        const fetchOptions = ytdlAgent ? { agent: ytdlAgent } : {};
+        const info = await ytdl.getInfo(video.url, fetchOptions);
+
         const audioFormat = ytdl.chooseFormat(info.formats, { quality: 'highestaudio' });
 
         res.json({
@@ -38,7 +57,7 @@ app.get('/play', async (req, res) => {
             url: audioFormat.url
         });
     } catch (err) {
-        console.error('ytdl-core error:', err);
+        console.error('ytdl-core /play error:', err.message);
         res.status(500).json({ error: err.message });
     } finally {
         activeProcesses--;
@@ -67,11 +86,13 @@ app.get('/video', async (req, res) => {
             return;
         }
 
-        const info = await ytdl.getInfo(video.url);
+        // Pass the agent (cookies) to getInfo
+        const fetchOptions = ytdlAgent ? { agent: ytdlAgent } : {};
+        const info = await ytdl.getInfo(video.url, fetchOptions);
 
         // Single combined stream for the background video (around 360p-480p)
         const videoFormat = ytdl.chooseFormat(info.formats, {
-            quality: '18', // 18 is usually 360p combined mp4. If missing, it falls back
+            quality: '18',
             filter: 'audioandvideo'
         });
 
@@ -82,7 +103,7 @@ app.get('/video', async (req, res) => {
             url: videoFormat.url
         });
     } catch (err) {
-        console.error('ytdl-core error:', err);
+        console.error('ytdl-core /video error:', err.message);
         res.status(500).json({ error: err.message });
     } finally {
         activeProcesses--;
@@ -90,7 +111,8 @@ app.get('/video', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send('VYBZZ YouTube Backend (v4.0 - ytdl-core + concurrency limit)');
+    const status = ytdlAgent ? '(Cookies Active 🍪)' : '(No Cookies)';
+    res.send(`VYBZZ YouTube Backend (v4.1 - ytdl-core + OOM Guard) ${status}`);
 });
 
 const PORT = process.env.PORT || 3000;
