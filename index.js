@@ -11,10 +11,9 @@ const MAX_CONCURRENT = 2;
 const MAX_VIDEO_DURATION = 420; // 7 minutes - skip video for longer songs
 
 /**
- * Common extractor function with OOM protections
- * Now also returns duration so frontend can do smart looping
+ * Extract info using yt-dlp with OOM protections
  */
-async function extract(query, format, isAudio) {
+function ytdlpExtract(query, format) {
     return new Promise((resolve, reject) => {
         if (activeProcesses >= MAX_CONCURRENT) {
             return reject(new Error('Server busy'));
@@ -22,70 +21,74 @@ async function extract(query, format, isAudio) {
 
         activeProcesses++;
 
-        const cmdFormat = format || (isAudio ? "bestaudio[ext=m4a]/bestaudio/best" : "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360]/best");
+        // Use --print for structured output and --get-url for the stream URL
+        // Do NOT use --flat-playlist with --get-url (they conflict)
+        const command = `yt-dlp --no-playlist --quiet --no-warnings -f "${format}" --print "%(title)s" --print "%(id)s" --print "%(duration)s" --get-url "ytsearch1:${query}"`;
 
-        // --print duration gives us the video length for smart decisions
-        const command = `yt-dlp --no-playlist --flat-playlist --quiet --no-warnings -f "${cmdFormat}" --print "title" --print "id" --print "duration" --get-url "ytsearch1:${query}"`;
-
-        exec(command, { timeout: 20000 }, (error, stdout, stderr) => {
+        exec(command, { timeout: 25000 }, (error, stdout, stderr) => {
             activeProcesses--;
 
             if (error) {
-                console.error(`yt-dlp error: ${stderr}`);
+                console.error(`yt-dlp error for "${query}": ${stderr}`);
                 return reject(error);
             }
 
-            const lines = stdout.trim().split('\n');
-            // Expected lines: [Title, ID, Duration, URL(s)]
+            const lines = stdout.trim().split('\n').filter(l => l.length > 0);
+
+            // For combined formats: [Title, ID, Duration, URL]
+            // For separate video+audio: [Title, ID, Duration, VideoURL, AudioURL]
             if (lines.length >= 4) {
                 const duration = parseInt(lines[2]) || 0;
-                resolve({
-                    title: lines[0],
-                    videoId: lines[1],
-                    duration: duration,
-                    url: lines[3]  // First URL (video or combined)
-                });
-            } else if (lines.length >= 1 && lines[0].startsWith('http')) {
-                resolve({ url: lines[0], duration: 0 });
+                // Get the first URL that starts with http (stream URL)
+                const url = lines.slice(3).find(l => l.startsWith('http'));
+                if (url) {
+                    resolve({ title: lines[0], videoId: lines[1], duration, url });
+                } else {
+                    reject(new Error('No stream URL found'));
+                }
             } else {
-                reject(new Error('No results'));
+                reject(new Error('Unexpected yt-dlp output'));
             }
         });
     });
 }
 
-// ENDPOINT: Audio Search (Fallback for main search)
+// ENDPOINT: Audio Search (Fallback for JioSaavn)
 app.get('/play', async (req, res) => {
     const query = req.query.q;
     if (!query) return res.status(400).json({ error: 'Query required' });
 
     try {
-        const result = await extract(query, "bestaudio[ext=m4a]/bestaudio/best", true);
+        // bestaudio only - single stream, low memory
+        const result = await ytdlpExtract(query, "bestaudio[ext=m4a]/bestaudio/best");
         res.json(result);
     } catch (err) {
-        res.status(err.message === 'Server busy' ? 503 : 500).json({ error: err.message });
+        const code = err.message === 'Server busy' ? 503 : 500;
+        res.status(code).json({ error: err.message });
     }
 });
 
-// ENDPOINT: Video Background Search
-// Returns duration so frontend can loop the middle 2 mins
+// ENDPOINT: Video Background (Smart loop)
+// Uses a SINGLE combined stream (best[height<=360]) to avoid muxing issues
 app.get('/video', async (req, res) => {
     const query = req.query.q;
     if (!query) return res.status(400).json({ error: 'Query required' });
 
     try {
-        // First do a quick duration check with minimal format
-        const result = await extract(query, "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360]/best", false);
+        // IMPORTANT: Use "best[height<=360]" not "bestvideo+bestaudio"
+        // Combined format gives us ONE direct URL that browsers can play directly
+        const result = await ytdlpExtract(query, "best[height<=360]/best[height<=480]/best");
 
-        // If video is too long, skip it to prevent OOM
+        // Skip videos that are too long (prevent OOM on subsequent requests)
         if (result.duration > MAX_VIDEO_DURATION) {
-            console.log(`Skipping video for "${query}" - too long (${result.duration}s)`);
-            return res.status(204).json({ skipped: true, reason: 'Video too long', duration: result.duration });
+            console.log(`Skipping video: "${query}" too long (${result.duration}s)`);
+            return res.status(204).end();
         }
 
         res.json(result);
     } catch (err) {
-        res.status(err.message === 'Server busy' ? 503 : 500).json({ error: err.message });
+        const code = err.message === 'Server busy' ? 503 : 500;
+        res.status(code).json({ error: err.message });
     }
 });
 
