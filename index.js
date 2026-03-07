@@ -117,22 +117,41 @@ app.get('/play', async (req, res) => {
 
     active++;
     try {
-        // Search YouTube + extract best audio format info as JSON
+        // Search YouTube + get ALL format info as JSON (no -f flag — let us pick manually)
         const raw = await ytdlp([
             `ytsearch1:${query}`,
-            '-f', 'bestaudio',
             '-j'
         ]);
 
         const info = JSON.parse(raw);
         const videoId = info.id;
 
-        // Get the direct stream URL (may be at top level or in requested_formats)
-        const streamUrl = info.url
-            || (info.requested_formats && info.requested_formats[0] && info.requested_formats[0].url);
+        // Pick best audio-only format, fallback to any format with audio
+        let streamUrl = null;
+        if (info.formats && info.formats.length > 0) {
+            // Prefer audio-only formats sorted by quality (higher abr = better)
+            const audioOnly = info.formats
+                .filter(f => f.acodec !== 'none' && (f.vcodec === 'none' || !f.vcodec))
+                .sort((a, b) => (b.abr || 0) - (a.abr || 0));
+
+            if (audioOnly.length > 0) {
+                streamUrl = audioOnly[0].url;
+            } else {
+                // Fallback: any format that has audio
+                const withAudio = info.formats
+                    .filter(f => f.acodec !== 'none')
+                    .sort((a, b) => (b.abr || 0) - (a.abr || 0));
+                if (withAudio.length > 0) {
+                    streamUrl = withAudio[0].url;
+                }
+            }
+        }
+
+        // Last resort: top-level url
+        if (!streamUrl) streamUrl = info.url;
 
         if (!streamUrl) {
-            throw new Error('yt-dlp returned no audio stream URL');
+            throw new Error('No audio stream URL found in any format');
         }
 
         // Cache the real YouTube URL (only Render's IP can use it)
@@ -173,7 +192,6 @@ app.get('/video', async (req, res) => {
     try {
         const raw = await ytdlp([
             `ytsearch1:${query}`,
-            '-f', 'best[height<=480]/best',
             '-j'
         ]);
 
@@ -186,11 +204,28 @@ app.get('/video', async (req, res) => {
         }
 
         const videoId = info.id;
-        const streamUrl = info.url
-            || (info.requested_formats && info.requested_formats[0] && info.requested_formats[0].url);
+
+        // Pick best combined (video+audio) format ≤480p
+        let streamUrl = null;
+        if (info.formats && info.formats.length > 0) {
+            const combined = info.formats
+                .filter(f => f.acodec !== 'none' && f.vcodec !== 'none' && (f.height || 0) <= 480)
+                .sort((a, b) => (b.height || 0) - (a.height || 0));
+
+            if (combined.length > 0) {
+                streamUrl = combined[0].url;
+            } else {
+                // Fallback: any combined format
+                const anyCombined = info.formats
+                    .filter(f => f.acodec !== 'none' && f.vcodec !== 'none')
+                    .sort((a, b) => (a.height || 999) - (b.height || 999));
+                if (anyCombined.length > 0) streamUrl = anyCombined[0].url;
+            }
+        }
+        if (!streamUrl) streamUrl = info.url;
 
         if (!streamUrl) {
-            throw new Error('yt-dlp returned no video stream URL');
+            throw new Error('No video stream URL found');
         }
 
         const cacheKey = `${videoId}:video`;
