@@ -205,20 +205,21 @@ app.get('/video', async (req, res) => {
 
         const videoId = info.id;
 
-        // Pick best combined (video+audio) format ≤480p
+        // Pick best combined (video+audio) format ≤480p, explicitly forcing H.264 (SDR)
         let streamUrl = null;
         if (info.formats && info.formats.length > 0) {
-            const combined = info.formats
-                .filter(f => f.acodec !== 'none' && f.vcodec !== 'none' && (f.height || 0) <= 480)
+            // First Priority: Strict H.264 (avc1) to stop Android GPU HDR spam
+            const h264 = info.formats
+                .filter(f => f.acodec !== 'none' && f.vcodec !== 'none' && (f.vcodec || '').includes('avc') && (f.height || 0) <= 480)
                 .sort((a, b) => (b.height || 0) - (a.height || 0));
 
-            if (combined.length > 0) {
-                streamUrl = combined[0].url;
+            if (h264.length > 0) {
+                streamUrl = h264[0].url;
             } else {
-                // Fallback: any combined format
+                // Second Priority: Stop HDR log spam, accept any combined format
                 const anyCombined = info.formats
-                    .filter(f => f.acodec !== 'none' && f.vcodec !== 'none')
-                    .sort((a, b) => (a.height || 999) - (b.height || 999));
+                    .filter(f => f.acodec !== 'none' && f.vcodec !== 'none' && (f.height || 0) <= 480)
+                    .sort((a, b) => (b.height || 0) - (a.height || 0));
                 if (anyCombined.length > 0) streamUrl = anyCombined[0].url;
             }
         }
