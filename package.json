@@ -1,16 +1,9 @@
 {
-    "name": "vybzz-backend-yt",
-    "version": "2.0.0",
-    "description": "YouTube URL extractor for VYBZZ - Optimized for Render (512MB RAM)",
-    "main": "index.js",
-    "scripts": {
-        "start": "node index.js"
-    },
-    "dependencies": {
-        "express": "^4.18.2",
-        "cors": "^2.8.5"
-    }
+  "dependencies": {
+    "@supabase/supabase-js": "^2.98.0",
+    "acorn": "^8.16.0",
+    "play-dl": "^1.9.7",
+    "youtube-ext": "^1.1.25",
+    "youtubei.js": "^16.0.1"
+  }
 }
-
-
-
