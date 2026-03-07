@@ -1,108 +1,99 @@
 const express = require('express');
+const { exec } = require('child_process');
 const cors = require('cors');
-const { exec, execSync } = require('child_process');
-const fs = require('fs');
-const app = express();
 
+const app = express();
 app.use(cors());
 
-let cookieArg = '';
-if (process.env.YT_COOKIES) {
-            fs.writeFileSync('/tmp/cookies.txt', process.env.YT_COOKIES);
-            cookieArg = '--cookies /tmp/cookies.txt';
-            console.log('Cookies loaded.');
+// Limit concurrent processes to avoid OOM
+let activeProcesses = 0;
+const MAX_CONCURRENT = 2;
+const MAX_VIDEO_DURATION = 420; // 7 minutes - skip video for longer songs
+
+/**
+ * Common extractor function with OOM protections
+ * Now also returns duration so frontend can do smart looping
+ */
+async function extract(query, format, isAudio) {
+    return new Promise((resolve, reject) => {
+        if (activeProcesses >= MAX_CONCURRENT) {
+            return reject(new Error('Server busy'));
+        }
+
+        activeProcesses++;
+
+        const cmdFormat = format || (isAudio ? "bestaudio[ext=m4a]/bestaudio/best" : "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360]/best");
+
+        // --print duration gives us the video length for smart decisions
+        const command = `yt-dlp --no-playlist --flat-playlist --quiet --no-warnings -f "${cmdFormat}" --print "title" --print "id" --print "duration" --get-url "ytsearch1:${query}"`;
+
+        exec(command, { timeout: 20000 }, (error, stdout, stderr) => {
+            activeProcesses--;
+
+            if (error) {
+                console.error(`yt-dlp error: ${stderr}`);
+                return reject(error);
+            }
+
+            const lines = stdout.trim().split('\n');
+            // Expected lines: [Title, ID, Duration, URL(s)]
+            if (lines.length >= 4) {
+                const duration = parseInt(lines[2]) || 0;
+                resolve({
+                    title: lines[0],
+                    videoId: lines[1],
+                    duration: duration,
+                    url: lines[3]  // First URL (video or combined)
+                });
+            } else if (lines.length >= 1 && lines[0].startsWith('http')) {
+                resolve({ url: lines[0], duration: 0 });
+            } else {
+                reject(new Error('No results'));
+            }
+        });
+    });
 }
 
-// Pre-cache EJS components
-try {
-            execSync(`yt-dlp --remote-components ejs:github "https://youtube.com/watch?v=dQw4w9WgXcQ" --skip-download 2>&1 || true`, { timeout: 60000 });
-            console.log('EJS components pre-cached.');
-} catch (e) { console.log('EJS cache error:', e.message); }
+// ENDPOINT: Audio Search (Fallback for main search)
+app.get('/play', async (req, res) => {
+    const query = req.query.q;
+    if (!query) return res.status(400).json({ error: 'Query required' });
+
+    try {
+        const result = await extract(query, "bestaudio[ext=m4a]/bestaudio/best", true);
+        res.json(result);
+    } catch (err) {
+        res.status(err.message === 'Server busy' ? 503 : 500).json({ error: err.message });
+    }
+});
+
+// ENDPOINT: Video Background Search
+// Returns duration so frontend can loop the middle 2 mins
+app.get('/video', async (req, res) => {
+    const query = req.query.q;
+    if (!query) return res.status(400).json({ error: 'Query required' });
+
+    try {
+        // First do a quick duration check with minimal format
+        const result = await extract(query, "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360]/best", false);
+
+        // If video is too long, skip it to prevent OOM
+        if (result.duration > MAX_VIDEO_DURATION) {
+            console.log(`Skipping video for "${query}" - too long (${result.duration}s)`);
+            return res.status(204).json({ skipped: true, reason: 'Video too long', duration: result.duration });
+        }
+
+        res.json(result);
+    } catch (err) {
+        res.status(err.message === 'Server busy' ? 503 : 500).json({ error: err.message });
+    }
+});
 
 app.get('/', (req, res) => {
-            res.json({ status: 'ok', service: 'vybzz-yt-backend' });
+    res.send('VYBZZ YouTube Backend (v2.1 - Smart Loop + OOM Protection)');
 });
 
-app.get('/play', (req, res) => {
-            const query = req.query.q;
-            if (!query) return res.status(400).json({ error: 'No query' });
-
-            const safe = query.replace(/[;"'`$\\|&<>]/g, '');
-            const cmd = `yt-dlp "ytsearch1:${safe}" -f bestaudio --get-url --get-title --get-id --get-duration --no-playlist -q ${cookieArg} --remote-components ejs:github`;
-            exec(cmd, { timeout: 50000 }, (err, stdout, stderr) => {
-                            if (err) return res.status(500).json({ error: 'Search/Stream failed', details: err.message, stderr: stderr });
-                            if (!stdout || !stdout.trim()) return res.status(404).json({ error: 'No stream' });
-
-                         const lines = stdout.trim().split('\n');
-                            if (lines.length < 4) return res.status(500).json({ error: 'Incomplete response', stdout });
-
-                         // Output format guarantees: title, id, url, duration
-                         res.json({
-                                             title: lines[0],
-                                             videoId: lines[1],
-                                             url: lines[2],
-                                             duration: lines[3]
-                         });
-            });
-});
-
-app.get('/video', (req, res) => {
-            const query = req.query.q;
-            if (!query) return res.status(400).json({ error: 'No query' });
-
-            const safe = query.replace(/[;"'`$\\|&<>]/g, '');
-            const cmd = `yt-dlp "ytsearch1:${safe}" -f "best" --get-url --get-title --get-id --get-duration --no-playlist -q ${cookieArg} --remote-components ejs:github`;
-            
-            exec(cmd, { timeout: 50000 }, (err, stdout, stderr) => {
-                            if (err) return res.status(500).json({ error: 'Video Search/Stream failed', details: err.message, stderr: stderr });
-                            if (!stdout || !stdout.trim()) return res.status(404).json({ error: 'No video stream' });
-
-                         const lines = stdout.trim().split('\n');
-                            if (lines.length < 4) return res.status(500).json({ error: 'Incomplete response', stdout });
-
-                         res.json({
-                                             title: lines[0],
-                                             videoId: lines[1],
-                                             url: lines[2],
-                                             duration: lines[3]
-                         });
-            });
-});
-
-app.get('/search', (req, res) => {
-            const query = req.query.q;
-            if (!query) return res.status(400).json({ error: 'No query' });
-
-            const safe = query.replace(/[;"'`$\\|&<>]/g, '');
-            const cmd = `yt-dlp "ytsearch1:${safe}" --get-id --get-title --get-duration --no-playlist -q ${cookieArg} --remote-components ejs:github`;
-            exec(cmd, { timeout: 45000 }, (err, stdout, stderr) => {
-                            if (err) return res.status(500).json({ error: 'Search failed', details: err.message, stderr: stderr });
-                            if (!stdout || !stdout.trim()) return res.json({ results: [] });
-                            const lines = stdout.trim().split('\n');
-                            const results = [];
-                            for (let i = 0; i < lines.length - 2; i += 3) {
-                                                results.push({
-                                                                        title: lines[i],
-                                                                        videoId: lines[i + 1],
-                                                                        duration: lines[i + 2]
-                                                });
-                            }
-                            res.json({ results });
-            });
-});
-
-app.get('/stream', (req, res) => {
-            const id = req.query.id;
-            if (!id || !/^[a-zA-Z0-9_-]{11}$/.test(id)) return res.status(400).json({ error: 'Invalid id' });
-
-            const cmd = `yt-dlp "https://youtube.com/watch?v=${id}" -f bestaudio -g ${cookieArg} --remote-components ejs:github`;
-            exec(cmd, { timeout: 45000 }, (err, stdout, stderr) => {
-                            if (err) return res.status(500).json({ error: 'Stream failed', details: err.message, stderr: stderr });
-                            if (!stdout || !stdout.trim()) return res.status(404).json({ error: 'No stream' });
-                            res.json({ url: stdout.trim() });
-            });
-});
-
-app.listen(process.env.PORT || 3000, () => {
-            console.log('Server started on port', process.env.PORT || 3000);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });
