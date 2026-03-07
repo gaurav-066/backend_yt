@@ -46,6 +46,29 @@ app.get('/play', (req, res) => {
             });
 });
 
+app.get('/video', (req, res) => {
+            const query = req.query.q;
+            if (!query) return res.status(400).json({ error: 'No query' });
+
+            const safe = query.replace(/[;"'`$\\|&<>]/g, '');
+            const cmd = `yt-dlp "ytsearch1:${safe}" -f "best" --get-url --get-title --get-id --get-duration --no-playlist -q ${cookieArg} --remote-components ejs:github`;
+            
+            exec(cmd, { timeout: 50000 }, (err, stdout, stderr) => {
+                            if (err) return res.status(500).json({ error: 'Video Search/Stream failed', details: err.message, stderr: stderr });
+                            if (!stdout || !stdout.trim()) return res.status(404).json({ error: 'No video stream' });
+
+                         const lines = stdout.trim().split('\n');
+                            if (lines.length < 4) return res.status(500).json({ error: 'Incomplete response', stdout });
+
+                         res.json({
+                                             title: lines[0],
+                                             videoId: lines[1],
+                                             url: lines[2],
+                                             duration: lines[3]
+                         });
+            });
+});
+
 app.get('/search', (req, res) => {
             const query = req.query.q;
             if (!query) return res.status(400).json({ error: 'No query' });
