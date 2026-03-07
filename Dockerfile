@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install yt-dlp
-RUN pip3 install yt-dlp
+RUN pip3 install --break-system-packages yt-dlp
 
 WORKDIR /app
 
