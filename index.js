@@ -129,17 +129,17 @@ app.get('/play', async (req, res) => {
         // Pick best audio-only format, fallback to any format with audio
         let streamUrl = null;
         if (info.formats && info.formats.length > 0) {
-            // Prefer audio-only formats sorted by quality (higher abr = better)
+            // Prefer audio-only formats sorted by quality (higher abr = better), expressly blocking HLS playlists
             const audioOnly = info.formats
-                .filter(f => f.acodec !== 'none' && (f.vcodec === 'none' || !f.vcodec))
+                .filter(f => f.acodec !== 'none' && (f.vcodec === 'none' || !f.vcodec) && !f.url.includes('manifest') && !f.url.includes('playlist'))
                 .sort((a, b) => (b.abr || 0) - (a.abr || 0));
 
             if (audioOnly.length > 0) {
                 streamUrl = audioOnly[0].url;
             } else {
-                // Fallback: any format that has audio
+                // Fallback: any format that has audio and is not a playlist
                 const withAudio = info.formats
-                    .filter(f => f.acodec !== 'none')
+                    .filter(f => f.acodec !== 'none' && !f.url.includes('manifest') && !f.url.includes('playlist'))
                     .sort((a, b) => (b.abr || 0) - (a.abr || 0));
                 if (withAudio.length > 0) {
                     streamUrl = withAudio[0].url;
@@ -210,7 +210,7 @@ app.get('/video', async (req, res) => {
         if (info.formats && info.formats.length > 0) {
             // First Priority: Strict raw MP4 H.264 (avc1) to stop Android GPU HDR + HLS spam
             const h264 = info.formats
-                .filter(f => f.acodec !== 'none' && f.vcodec !== 'none' && f.ext === 'mp4' && (f.vcodec || '').includes('avc') && (f.height || 0) <= 480)
+                .filter(f => f.acodec !== 'none' && f.vcodec !== 'none' && f.ext === 'mp4' && (f.vcodec || '').includes('avc') && (f.height || 0) <= 480 && !f.url.includes('manifest') && !f.url.includes('playlist'))
                 .sort((a, b) => (b.height || 0) - (a.height || 0));
 
             if (h264.length > 0) {
@@ -218,7 +218,7 @@ app.get('/video', async (req, res) => {
             } else {
                 // Second Priority: Accept any direct MP4 combined format (block m3u8 playlists)
                 const anyMp4 = info.formats
-                    .filter(f => f.acodec !== 'none' && f.vcodec !== 'none' && f.ext === 'mp4' && (f.height || 0) <= 480)
+                    .filter(f => f.acodec !== 'none' && f.vcodec !== 'none' && f.ext === 'mp4' && (f.height || 0) <= 480 && !f.url.includes('manifest') && !f.url.includes('playlist'))
                     .sort((a, b) => (b.height || 0) - (a.height || 0));
                 if (anyMp4.length > 0) streamUrl = anyMp4[0].url;
             }
