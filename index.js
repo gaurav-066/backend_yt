@@ -9,6 +9,9 @@ const path = require('path');
 const app = express();
 app.use(cors());
 
+// Path to the yt-dlp binary (downloaded during build)
+const YTDLP_BIN = path.join(__dirname, 'yt-dlp');
+
 // ─── CONFIG ─────────────────────────────────────────
 const MAX_CONCURRENT = 2;
 const MAX_VIDEO_DURATION = 420;  // 7 minutes max for background video
@@ -28,7 +31,7 @@ if (process.env.YT_COOKIES) {
 }
 
 // ─── VERIFY YT-DLP ON STARTUP ──────────────────────
-execFile('yt-dlp', ['--version'], { timeout: 5000 }, (err, stdout) => {
+execFile(YTDLP_BIN, ['--version'], { timeout: 5000 }, (err, stdout) => {
     if (err) {
         console.error('❌ yt-dlp is NOT installed or not in PATH!');
     } else {
@@ -83,7 +86,7 @@ function ytdlp(args) {
         console.log(`[yt-dlp] Running: yt-dlp ${args.join(' ')}`);
         const startTime = Date.now();
 
-        execFile('yt-dlp', allArgs, {
+        execFile(YTDLP_BIN, allArgs, {
             timeout: 40000,   // 40 seconds max
             maxBuffer: 2 * 1024 * 1024,
             env: { ...process.env, PYTHONUNBUFFERED: '1' }

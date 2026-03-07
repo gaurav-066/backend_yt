@@ -4,6 +4,7 @@
     "description": "VYBZZ YouTube backend — yt-dlp search + pipe proxy streaming",
     "main": "index.js",
     "scripts": {
+        "build": "curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ./yt-dlp && chmod +x ./yt-dlp",
         "start": "node index.js"
     },
     "dependencies": {
