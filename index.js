@@ -9,21 +9,26 @@ const path = require("path");
 const app = express();
 app.use(cors());
 
-
 /* ───────── CONFIG ───────── */
 
 const MAX_CONCURRENT = 2;
 const MAX_VIDEO_DURATION = 420;
 const CACHE_TTL = 3 * 60 * 60 * 1000;
+
 const COOKIES_FILE = path.join(__dirname, "cookies.txt");
 
 let active = 0;
 
-/* LOAD COOKIES FROM ENV */
+/* ───────── LOAD COOKIES FROM ENV ───────── */
 
 if (process.env.YT_COOKIES) {
-  fs.writeFileSync(COOKIES_FILE, process.env.YT_COOKIES);
-  console.log("Cookies loaded");
+  try {
+    const cookies = process.env.YT_COOKIES.replace(/\\n/g, "\n");
+    fs.writeFileSync(COOKIES_FILE, cookies);
+    console.log("Cookies loaded");
+  } catch (e) {
+    console.error("Failed to write cookies:", e.message);
+  }
 }
 
 /* ───────── CACHE ───────── */
@@ -31,10 +36,14 @@ if (process.env.YT_COOKIES) {
 const urlCache = new Map();
 
 function cacheUrl(key, url) {
-  urlCache.set(key, { url, ts: Date.now() });
+  urlCache.set(key, {
+    url,
+    ts: Date.now()
+  });
 }
 
 function getCachedUrl(key) {
+
   const entry = urlCache.get(key);
   if (!entry) return null;
 
@@ -49,13 +58,32 @@ function getCachedUrl(key) {
 /* ───────── VERIFY YT-DLP ───────── */
 
 execFile("yt-dlp", ["--version"], (err, stdout) => {
-  if (err) console.error("yt-dlp not installed");
-  else console.log("yt-dlp:", stdout.trim());
+  if (err) {
+    console.error("yt-dlp not installed");
+  } else {
+    console.log("yt-dlp:", stdout.trim());
+  }
 });
 
-/* ───────── YT-DLP WRAPPER (FAST MODE) ───────── */
+/* ───────── SAFE JSON PARSER ───────── */
+
+function parseYtJson(raw) {
+
+  const start = raw.indexOf("{");
+
+  if (start === -1) {
+    throw new Error("Invalid yt-dlp output");
+  }
+
+  const json = raw.slice(start);
+
+  return JSON.parse(json);
+}
+
+/* ───────── YT-DLP WRAPPER ───────── */
 
 function ytdlp(args) {
+
   return new Promise((resolve, reject) => {
 
     const cookieArgs = fs.existsSync(COOKIES_FILE)
@@ -63,6 +91,7 @@ function ytdlp(args) {
       : [];
 
     const fullArgs = [
+
       ...cookieArgs,
 
       "--skip-download",
@@ -70,6 +99,7 @@ function ytdlp(args) {
 
       "--no-playlist",
       "--no-warnings",
+      "--no-progress",
       "--no-check-certificates",
 
       "--format-sort",
@@ -84,7 +114,10 @@ function ytdlp(args) {
     execFile(
       "yt-dlp",
       fullArgs,
-      { timeout: 30000, maxBuffer: 2 * 1024 * 1024 },
+      {
+        timeout: 30000,
+        maxBuffer: 10 * 1024 * 1024
+      },
       (err, stdout, stderr) => {
 
         if (err) {
@@ -96,34 +129,33 @@ function ytdlp(args) {
     );
 
   });
+
 }
 
-/* ───────── PREFETCH FUNCTION ───────── */
+/* ───────── PREFETCH AUDIO ───────── */
 
 async function prefetchAudio(videoId) {
+
   try {
 
     const key = `${videoId}:audio`;
 
-    // If already cached, skip
     if (getCachedUrl(key)) return;
 
     const raw = await ytdlp([
-      `https://www.youtube.com/watch?v=${videoId}`,
-      "-j",
+      `https://www.youtube.com/watch?v=${videoId}`
     ]);
 
-    const info = JSON.parse(raw);
+    const info = parseYtJson(raw);
 
     let streamUrl = null;
 
     const audioFormats = info.formats
-      .filter(
-        (f) =>
-          f.acodec !== "none" &&
-          (f.vcodec === "none" || !f.vcodec) &&
-          !f.url.includes("manifest") &&
-          !f.url.includes("playlist")
+      .filter(f =>
+        f.acodec !== "none" &&
+        (f.vcodec === "none" || !f.vcodec) &&
+        !f.url.includes("manifest") &&
+        !f.url.includes("playlist")
       )
       .sort((a, b) => (b.abr || 0) - (a.abr || 0));
 
@@ -140,12 +172,17 @@ async function prefetchAudio(videoId) {
     }
 
   } catch (err) {
+
     console.error("Prefetch audio failed:", err.message);
+
   }
+
 }
+
 /* ───────── VIDEO ENDPOINT ───────── */
 
 app.get("/video", async (req, res) => {
+
   const query = req.query.q;
   const videoIdParam = req.query.id;
 
@@ -160,18 +197,24 @@ app.get("/video", async (req, res) => {
   active++;
 
   try {
+
     let raw;
 
     if (videoIdParam) {
+
       raw = await ytdlp([
-        `https://www.youtube.com/watch?v=${videoIdParam}`,
-        "-j",
+        `https://www.youtube.com/watch?v=${videoIdParam}`
       ]);
+
     } else {
-      raw = await ytdlp([`ytsearch1:${query}`, "-j"]);
+
+      raw = await ytdlp([
+        `ytsearch1:${query}`
+      ]);
+
     }
 
-    const info = JSON.parse(raw);
+    const info = parseYtJson(raw);
 
     if (info.duration && info.duration > MAX_VIDEO_DURATION) {
       return res.status(204).end();
@@ -182,21 +225,26 @@ app.get("/video", async (req, res) => {
     let streamUrl = null;
 
     const mp4 = info.formats
-      .filter(
-        (f) =>
-          f.acodec !== "none" &&
-          f.vcodec !== "none" &&
-          f.ext === "mp4" &&
-          (f.height || 0) <= 480 &&
-          !f.url.includes("manifest")
+      .filter(f =>
+        f.acodec !== "none" &&
+        f.vcodec !== "none" &&
+        f.ext === "mp4" &&
+        (f.height || 0) <= 480 &&
+        !f.url.includes("manifest")
       )
       .sort((a, b) => (b.height || 0) - (a.height || 0));
 
-    if (mp4.length > 0) streamUrl = mp4[0].url;
+    if (mp4.length > 0) {
+      streamUrl = mp4[0].url;
+    }
 
-    if (!streamUrl) streamUrl = info.url;
+    if (!streamUrl) {
+      streamUrl = info.url;
+    }
 
-    if (!streamUrl) throw new Error("No stream URL");
+    if (!streamUrl) {
+      throw new Error("No stream URL");
+    }
 
     const cacheKey = `${videoId}:video`;
 
@@ -208,28 +256,35 @@ app.get("/video", async (req, res) => {
       videoId,
       title: info.title,
       duration: info.duration,
-      url: `${host}/stream/${videoId}?t=video`,
+      url: `${host}/stream/${videoId}?t=video`
     });
-
-    /* PREFETCH next likely request */
 
     if (query && videoId) {
       setTimeout(() => prefetchAudio(videoId), 0);
     }
+
   } catch (err) {
+
     console.error(err);
     res.status(500).json({ error: err.message });
+
   } finally {
+
     active--;
+
   }
+
 });
 
 /* ───────── AUDIO ENDPOINT ───────── */
 
 app.get("/audio", async (req, res) => {
+
   const videoId = req.query.id;
 
-  if (!videoId) return res.status(400).json({ error: "videoId required" });
+  if (!videoId) {
+    return res.status(400).json({ error: "videoId required" });
+  }
 
   if (active >= MAX_CONCURRENT) {
     return res.status(503).json({ error: "Server busy" });
@@ -238,29 +293,34 @@ app.get("/audio", async (req, res) => {
   active++;
 
   try {
+
     const raw = await ytdlp([
-      `https://www.youtube.com/watch?v=${videoId}`,
-      "-j",
+      `https://www.youtube.com/watch?v=${videoId}`
     ]);
 
-    const info = JSON.parse(raw);
+    const info = parseYtJson(raw);
 
     let streamUrl = null;
 
     const audioFormats = info.formats
-      .filter(
-        (f) =>
-          f.acodec !== "none" &&
-          (f.vcodec === "none" || !f.vcodec) &&
-          !f.url.includes("manifest")
+      .filter(f =>
+        f.acodec !== "none" &&
+        (f.vcodec === "none" || !f.vcodec) &&
+        !f.url.includes("manifest")
       )
       .sort((a, b) => (b.abr || 0) - (a.abr || 0));
 
-    if (audioFormats.length > 0) streamUrl = audioFormats[0].url;
+    if (audioFormats.length > 0) {
+      streamUrl = audioFormats[0].url;
+    }
 
-    if (!streamUrl) streamUrl = info.url;
+    if (!streamUrl) {
+      streamUrl = info.url;
+    }
 
-    if (!streamUrl) throw new Error("No audio stream");
+    if (!streamUrl) {
+      throw new Error("No audio stream");
+    }
 
     const cacheKey = `${videoId}:audio`;
 
@@ -272,19 +332,26 @@ app.get("/audio", async (req, res) => {
       videoId,
       title: info.title,
       duration: info.duration,
-      url: `${host}/stream/${videoId}?t=audio`,
+      url: `${host}/stream/${videoId}?t=audio`
     });
+
   } catch (err) {
+
     console.error(err);
     res.status(500).json({ error: err.message });
+
   } finally {
+
     active--;
+
   }
+
 });
 
 /* ───────── STREAM PROXY ───────── */
 
 app.get("/stream/:videoId", (req, res) => {
+
   const videoId = req.params.videoId;
   const type = req.query.t || "video";
 
@@ -292,65 +359,83 @@ app.get("/stream/:videoId", (req, res) => {
   const sourceUrl = getCachedUrl(cacheKey);
 
   if (!sourceUrl) {
-    return res.status(410).json({
-      error: "Stream expired. Client should refetch.",
-    });
+    return res.status(410).json({ error: "Stream expired" });
   }
 
   const parsed = new URL(sourceUrl);
+
   const client = parsed.protocol === "https:" ? https : http;
 
   const headers = {
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": "Mozilla/5.0"
   };
 
-  if (req.headers.range) headers.Range = req.headers.range;
+  if (req.headers.range) {
+    headers.Range = req.headers.range;
+  }
 
   const options = {
     hostname: parsed.hostname,
     port: parsed.port || 443,
     path: parsed.pathname + parsed.search,
-    headers,
+    headers
   };
 
-  const upstream = client.get(options, (ytRes) => {
+  const upstream = client.get(options, ytRes => {
+
     res.status(ytRes.statusCode);
 
-    ["content-type", "content-length", "content-range", "accept-ranges"].forEach(
-      (h) => {
-        if (ytRes.headers[h]) res.setHeader(h, ytRes.headers[h]);
+    [
+      "content-type",
+      "content-length",
+      "content-range",
+      "accept-ranges"
+    ].forEach(h => {
+
+      if (ytRes.headers[h]) {
+        res.setHeader(h, ytRes.headers[h]);
       }
-    );
+
+    });
 
     res.setHeader("Access-Control-Allow-Origin", "*");
 
     ytRes.pipe(res);
+
   });
 
-  upstream.on("error", (err) => {
+  upstream.on("error", err => {
+
     console.error("Stream error:", err.message);
+
     if (!res.headersSent) {
       res.status(500).json({ error: "Stream failed" });
     }
+
   });
 
   res.on("close", () => {
     upstream.destroy();
   });
+
 });
 
 /* ───────── HEALTH CHECK ───────── */
 
 app.get("/", (req, res) => {
+
   res.send(
     `YT Backend Running | cache=${urlCache.size} | active=${active}/${MAX_CONCURRENT}`
   );
+
 });
 
-/* ───────── START SERVER ───────── */
+/* ───────── SERVER START ───────── */
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
+
   console.log("YT backend running on port", PORT);
+
 });
