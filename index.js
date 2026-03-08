@@ -9,41 +9,38 @@ const path = require('path');
 const app = express();
 app.use(cors());
 
+/* ───────── CONFIG ───────── */
 
-// ─── CONFIG ─────────────────────────────────────────
 const MAX_CONCURRENT = 2;
-const MAX_VIDEO_DURATION = 420;  // 7 minutes max for background video
-const CACHE_TTL = 3 * 60 * 60 * 1000;  // 3 hours (YouTube URLs expire ~6h)
+const MAX_VIDEO_DURATION = 420;
+const CACHE_TTL = 3 * 60 * 60 * 1000;
 const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
 
-// ─── COOKIE SETUP ───────────────────────────────────
+/* ───────── COOKIE SETUP ───────── */
+
 if (process.env.YT_COOKIES) {
     try {
         fs.writeFileSync(COOKIES_FILE, process.env.YT_COOKIES);
-        console.log('✅ Cookies written to cookies.txt');
+        console.log("Cookies loaded");
     } catch (e) {
-        console.warn('⚠️ Failed to write cookies:', e.message);
+        console.warn("Cookie load failed");
     }
-} else {
-    console.log('ℹ️  No YT_COOKIES env var — running without cookies');
 }
 
-// ─── VERIFY YT-DLP ON STARTUP ──────────────────────
-execFile('yt-dlp', ['--version'], { timeout: 5000 }, (err, stdout) => {
-    if (err) {
-        console.error('❌ yt-dlp is NOT installed or not in PATH!');
-    } else {
-        console.log('✅ yt-dlp version:', stdout.trim());
-    }
+/* ───────── VERIFY YT-DLP ───────── */
+
+execFile('yt-dlp', ['--version'], (err, stdout) => {
+    if (err) console.error("yt-dlp missing");
+    else console.log("yt-dlp:", stdout.trim());
 });
 
-// ─── STREAM URL CACHE ──────────────────────────────
-// Key: "videoId:audio" or "videoId:video"  →  Value: { url, ts }
+/* ───────── CACHE ───────── */
+
 const urlCache = new Map();
 
 function cacheUrl(key, url) {
     urlCache.set(key, { url, ts: Date.now() });
-    // Prevent unbounded growth
+
     if (urlCache.size > 200) {
         const now = Date.now();
         for (const [k, v] of urlCache) {
@@ -54,294 +51,232 @@ function cacheUrl(key, url) {
 
 function getCachedUrl(key) {
     const entry = urlCache.get(key);
+
     if (!entry) return null;
+
     if (Date.now() - entry.ts > CACHE_TTL) {
         urlCache.delete(key);
         return null;
     }
+
     return entry.url;
 }
 
-// ─── CONCURRENCY GUARD ─────────────────────────────
+/* ───────── CONCURRENCY LIMIT ───────── */
+
 let active = 0;
 
-// ─── YT-DLP WRAPPER ────────────────────────────────
+/* ───────── YT-DLP WRAPPER ───────── */
+
 function ytdlp(args) {
+
     return new Promise((resolve, reject) => {
+
         const cookieArgs = fs.existsSync(COOKIES_FILE)
             ? ['--cookies', COOKIES_FILE]
             : [];
 
-        const allArgs = [
+        const fullArgs = [
             ...cookieArgs,
             '--no-warnings',
-            '--no-check-certificates',
             '--no-playlist',
+            '--no-check-certificates',
             '--remote-components', 'ejs:github',
             ...args
         ];
 
-        console.log(`[yt-dlp] Running: yt-dlp ${args.join(' ')}`);
-        const startTime = Date.now();
+        execFile(
+            'yt-dlp',
+            fullArgs,
+            { timeout: 40000, maxBuffer: 2 * 1024 * 1024 },
+            (err, stdout, stderr) => {
 
-        execFile('yt-dlp', allArgs, {
-            timeout: 40000,   // 40 seconds max
-            maxBuffer: 2 * 1024 * 1024,
-            env: { ...process.env, PYTHONUNBUFFERED: '1' }
-        }, (err, stdout, stderr) => {
-            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                if (err) {
+                    const msg = stderr || err.message;
+                    return reject(new Error(msg));
+                }
 
-            if (err) {
-                // Extract the most useful error line
-                const lines = (stderr || err.message || '').split('\n');
-                const errorLine = lines.find(l => l.includes('ERROR')) || lines[0] || err.message;
-                console.error(`[yt-dlp] Failed in ${elapsed}s: ${errorLine}`);
-                reject(new Error(errorLine));
-            } else {
-                console.log(`[yt-dlp] Done in ${elapsed}s (${stdout.length} bytes)`);
                 resolve(stdout.trim());
             }
-        });
+        );
     });
 }
 
-// ─── /play ENDPOINT ────────────────────────────────
-// Searches YouTube, extracts the best audio URL, caches it,
-// and returns a proxy stream URL to the browser.
-app.get('/play', async (req, res) => {
-    const query = req.query.q;
-    if (!query) return res.status(400).json({ error: 'Query required' });
-    if (active >= MAX_CONCURRENT) {
-        return res.status(503).json({ error: 'Server busy, try again in a few seconds' });
-    }
+/* ───────── VIDEO ENDPOINT ───────── */
 
-    active++;
-    try {
-        // Search YouTube + get ALL format info as JSON (no -f flag — let us pick manually)
-        const raw = await ytdlp([
-            `ytsearch1:${query}`,
-            '-j'
-        ]);
-
-        const info = JSON.parse(raw);
-        const videoId = info.id;
-
-        // Pick best audio-only format, fallback to any format with audio
-        let streamUrl = null;
-        if (info.formats && info.formats.length > 0) {
-            // Prefer audio-only formats sorted by quality (higher abr = better), expressly blocking HLS playlists
-            const audioOnly = info.formats
-                .filter(f => f.acodec !== 'none' && (f.vcodec === 'none' || !f.vcodec) && !f.url.includes('manifest') && !f.url.includes('playlist'))
-                .sort((a, b) => (b.abr || 0) - (a.abr || 0));
-
-            if (audioOnly.length > 0) {
-                streamUrl = audioOnly[0].url;
-            } else {
-                // Fallback: any format that has audio and is not a playlist
-                const withAudio = info.formats
-                    .filter(f => f.acodec !== 'none' && !f.url.includes('manifest') && !f.url.includes('playlist'))
-                    .sort((a, b) => (b.abr || 0) - (a.abr || 0));
-                if (withAudio.length > 0) {
-                    streamUrl = withAudio[0].url;
-                }
-            }
-        }
-
-        // Last resort: top-level url
-        if (!streamUrl) streamUrl = info.url;
-
-        if (!streamUrl) {
-            throw new Error('No audio stream URL found in any format');
-        }
-
-        // Cache the real YouTube URL (only Render's IP can use it)
-        const cacheKey = `${videoId}:audio`;
-        cacheUrl(cacheKey, streamUrl);
-
-        // Build our proxy URL that the browser will actually use
-        const host = `https://${req.get('host')}`;
-
-        res.json({
-            videoId,
-            title: info.title || query,
-            artist: info.channel || info.uploader || '',
-            duration: info.duration || 0,
-            thumbnail: info.thumbnail || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-            url: `${host}/stream/${videoId}?t=audio`
-        });
-
-    } catch (err) {
-        console.error('/play error:', err.message);
-        res.status(500).json({ error: err.message });
-    } finally {
-        active--;
-    }
-});
-
-// ─── /video ENDPOINT ───────────────────────────────
-// Same as /play but picks a low-res combined video+audio format
-// for background video in the fullscreen player.
 app.get('/video', async (req, res) => {
+
     const query = req.query.q;
-    if (!query) return res.status(400).json({ error: 'Query required' });
-    if (active >= MAX_CONCURRENT) {
-        return res.status(503).json({ error: 'Server busy, try again in a few seconds' });
-    }
+    const videoIdParam = req.query.id;
+
+    if (!query && !videoIdParam)
+        return res.status(400).json({ error: "Query or videoId required" });
+
+    if (active >= MAX_CONCURRENT)
+        return res.status(503).json({ error: "Server busy" });
 
     active++;
+
     try {
-        const raw = await ytdlp([
-            `ytsearch1:${query}`,
-            '-j'
-        ]);
+
+        let raw;
+
+        /* FAST MODE (videoId) */
+
+        if (videoIdParam) {
+
+            raw = await ytdlp([
+                `https://www.youtube.com/watch?v=${videoIdParam}`,
+                "-j"
+            ]);
+
+        }
+
+        /* SEARCH MODE */
+
+        else {
+
+            raw = await ytdlp([
+                `ytsearch1:${query}`,
+                "-j"
+            ]);
+
+        }
 
         const info = JSON.parse(raw);
 
-        // Skip videos that are too long (saves bandwidth)
-        if (info.duration && info.duration > MAX_VIDEO_DURATION) {
-            console.log(`[/video] Skipping "${query}" — too long (${info.duration}s)`);
+        if (info.duration && info.duration > MAX_VIDEO_DURATION)
             return res.status(204).end();
-        }
 
         const videoId = info.id;
 
-        // Pick best combined (video+audio) format ≤480p, explicitly forcing H.264 (SDR)
         let streamUrl = null;
+
         if (info.formats && info.formats.length > 0) {
-            // First Priority: Strict raw MP4 H.264 (avc1) to stop Android GPU HDR + HLS spam
-            const h264 = info.formats
-                .filter(f => f.acodec !== 'none' && f.vcodec !== 'none' && f.ext === 'mp4' && (f.vcodec || '').includes('avc') && (f.height || 0) <= 480 && !f.url.includes('manifest') && !f.url.includes('playlist'))
+
+            const mp4 = info.formats
+                .filter(f =>
+                    f.acodec !== "none" &&
+                    f.vcodec !== "none" &&
+                    f.ext === "mp4" &&
+                    (f.height || 0) <= 480 &&
+                    !f.url.includes("manifest")
+                )
                 .sort((a, b) => (b.height || 0) - (a.height || 0));
 
-            if (h264.length > 0) {
-                streamUrl = h264[0].url;
-            } else {
-                // Second Priority: Accept any direct MP4 combined format (block m3u8 playlists)
-                const anyMp4 = info.formats
-                    .filter(f => f.acodec !== 'none' && f.vcodec !== 'none' && f.ext === 'mp4' && (f.height || 0) <= 480 && !f.url.includes('manifest') && !f.url.includes('playlist'))
-                    .sort((a, b) => (b.height || 0) - (a.height || 0));
-                if (anyMp4.length > 0) streamUrl = anyMp4[0].url;
-            }
+            if (mp4.length > 0)
+                streamUrl = mp4[0].url;
         }
-        if (!streamUrl) streamUrl = info.url;
 
-        if (!streamUrl) {
-            throw new Error('No video stream URL found');
-        }
+        if (!streamUrl)
+            streamUrl = info.url;
+
+        if (!streamUrl)
+            throw new Error("No stream URL");
 
         const cacheKey = `${videoId}:video`;
+
         cacheUrl(cacheKey, streamUrl);
 
-        const host = `https://${req.get('host')}`;
+        const host = `https://${req.get("host")}`;
 
         res.json({
             videoId,
-            title: info.title || query,
-            duration: info.duration || 0,
+            title: info.title,
+            duration: info.duration,
             url: `${host}/stream/${videoId}?t=video`
         });
 
-    } catch (err) {
-        console.error('/video error:', err.message);
-        res.status(500).json({ error: err.message });
-    } finally {
-        active--;
     }
+    catch (err) {
+
+        console.error(err);
+
+        res.status(500).json({ error: err.message });
+
+    }
+    finally {
+
+        active--;
+
+    }
+
 });
 
-// ─── /stream/:videoId ENDPOINT (Pipe Proxy) ────────
-// This is the magic: Render fetches from googlevideo.com (same IP
-// that extracted the URL) and pipes it straight to the browser.
-// Zero buffering, zero RAM usage — just a passthrough.
-// Supports HTTP Range requests so seeking works in the player.
+/* ───────── STREAM ENDPOINT ───────── */
+
 app.get('/stream/:videoId', (req, res) => {
-    const { videoId } = req.params;
-    const type = req.query.t || 'audio';
+
+    const videoId = req.params.videoId;
+
+    const type = req.query.t || "video";
+
     const cacheKey = `${videoId}:${type}`;
 
     const sourceUrl = getCachedUrl(cacheKey);
-    if (!sourceUrl) {
-        return res.status(410).json({
-            error: 'Stream expired or not found — the app will re-search automatically'
-        });
-    }
 
-    try {
-        const parsed = new URL(sourceUrl);
-        const client = parsed.protocol === 'https:' ? https : http;
+    if (!sourceUrl)
+        return res.status(410).json({ error: "Stream expired" });
 
-        // Build request headers
-        const reqHeaders = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        };
+    const parsed = new URL(sourceUrl);
 
-        // Forward Range header — essential for seeking in <audio>/<video>
-        if (req.headers.range) {
-            reqHeaders['Range'] = req.headers.range;
-        }
+    const client = parsed.protocol === "https:" ? https : http;
 
-        const options = {
-            hostname: parsed.hostname,
-            port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-            path: parsed.pathname + parsed.search,
-            headers: reqHeaders
-        };
+    const headers = {
+        "User-Agent": "Mozilla/5.0"
+    };
 
-        const upstream = client.get(options, (ytRes) => {
-            // Forward status: 200 = full file, 206 = partial (seek)
-            res.status(ytRes.statusCode);
+    if (req.headers.range)
+        headers.Range = req.headers.range;
 
-            // Forward headers the browser needs for playback
-            const headersToForward = [
-                'content-type',
-                'content-length',
-                'content-range',
-                'accept-ranges'
-            ];
-            headersToForward.forEach(h => {
-                if (ytRes.headers[h]) res.setHeader(h, ytRes.headers[h]);
+    const options = {
+        hostname: parsed.hostname,
+        port: parsed.port || 443,
+        path: parsed.pathname + parsed.search,
+        headers
+    };
+
+    const upstream = client.get(options, ytRes => {
+
+        res.status(ytRes.statusCode);
+
+        ["content-type", "content-length", "content-range", "accept-ranges"]
+            .forEach(h => {
+                if (ytRes.headers[h])
+                    res.setHeader(h, ytRes.headers[h]);
             });
 
-            // Allow CORS on the stream itself
-            res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader("Access-Control-Allow-Origin", "*");
 
-            // Pipe: YouTube → Render → Browser (zero buffering)
-            ytRes.pipe(res);
+        ytRes.pipe(res);
 
-            ytRes.on('error', () => {
-                try { res.end(); } catch (e) { /* already closed */ }
-            });
-        });
+    });
 
-        upstream.on('error', (err) => {
-            console.error(`[stream] Upstream error for ${cacheKey}:`, err.message);
-            if (!res.headersSent) {
-                res.status(502).json({ error: 'YouTube stream failed — try again' });
-            }
-        });
+    upstream.on("error", err => {
 
-        // Clean up if the browser disconnects mid-stream
-        res.on('close', () => {
-            try { upstream.destroy(); } catch (e) { /* already destroyed */ }
-        });
+        console.error(err);
 
-    } catch (err) {
-        console.error('[stream] Error:', err.message);
-        if (!res.headersSent) {
-            res.status(500).json({ error: 'Internal stream error' });
-        }
-    }
+        if (!res.headersSent)
+            res.status(500).json({ error: "Stream error" });
+
+    });
+
 });
 
-// ─── HEALTH CHECK ──────────────────────────────────
+/* ───────── HEALTH CHECK ───────── */
+
 app.get('/', (req, res) => {
-    const cookies = fs.existsSync(COOKIES_FILE) ? '🍪' : '❌';
-    const cached = urlCache.size;
-    res.send(`VYBZZ YT Backend v5.0 | yt-dlp + pipe proxy | Cookies: ${cookies} | Cached: ${cached} | Load: ${active}/${MAX_CONCURRENT}`);
+
+    res.send(`YT Backend Running | cache=${urlCache.size} | load=${active}`);
+
 });
 
-// ─── START SERVER ──────────────────────────────────
+/* ───────── SERVER START ───────── */
+
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-    console.log(`🚀 VYBZZ Backend v5.0 running on port ${PORT}`);
+
+    console.log("Server running on", PORT);
+
 });
