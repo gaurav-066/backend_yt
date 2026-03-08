@@ -109,11 +109,13 @@ app.get('/video', async (req, res) => {
     const query = req.query.q;
     const videoIdParam = req.query.id;
 
-    if (!query && !videoIdParam)
+    if (!query && !videoIdParam) {
         return res.status(400).json({ error: "Query or videoId required" });
+    }
 
-    if (active >= MAX_CONCURRENT)
+    if (active >= MAX_CONCURRENT) {
         return res.status(503).json({ error: "Server busy" });
+    }
 
     active++;
 
@@ -121,8 +123,7 @@ app.get('/video', async (req, res) => {
 
         let raw;
 
-        /* FAST MODE (videoId) */
-
+        /* FAST MODE (direct video id) */
         if (videoIdParam) {
 
             raw = await ytdlp([
@@ -133,7 +134,6 @@ app.get('/video', async (req, res) => {
         }
 
         /* SEARCH MODE */
-
         else {
 
             raw = await ytdlp([
@@ -145,8 +145,9 @@ app.get('/video', async (req, res) => {
 
         const info = JSON.parse(raw);
 
-        if (info.duration && info.duration > MAX_VIDEO_DURATION)
+        if (info.duration && info.duration > MAX_VIDEO_DURATION) {
             return res.status(204).end();
+        }
 
         const videoId = info.id;
 
@@ -160,38 +161,41 @@ app.get('/video', async (req, res) => {
                     f.vcodec !== "none" &&
                     f.ext === "mp4" &&
                     (f.height || 0) <= 480 &&
-                    !f.url.includes("manifest")
+                    !f.url.includes("manifest") &&
+                    !f.url.includes("playlist")
                 )
                 .sort((a, b) => (b.height || 0) - (a.height || 0));
 
-            if (mp4.length > 0)
+            if (mp4.length > 0) {
                 streamUrl = mp4[0].url;
+            }
+
         }
 
-        if (!streamUrl)
+        if (!streamUrl) {
             streamUrl = info.url;
+        }
 
-        if (!streamUrl)
-            throw new Error("No stream URL");
+        if (!streamUrl) {
+            throw new Error("No stream URL found");
+        }
 
         const cacheKey = `${videoId}:video`;
-
         cacheUrl(cacheKey, streamUrl);
 
-        const host = `https://${req.get("host")}`;
+        const host = `${req.protocol}://${req.get("host")}`;
 
         res.json({
             videoId,
-            title: info.title,
-            duration: info.duration,
+            title: info.title || "",
+            duration: info.duration || 0,
             url: `${host}/stream/${videoId}?t=video`
         });
 
     }
     catch (err) {
 
-        console.error(err);
-
+        console.error("VIDEO ERROR:", err.message);
         res.status(500).json({ error: err.message });
 
     }
@@ -203,80 +207,183 @@ app.get('/video', async (req, res) => {
 
 });
 
+
+/* ───────── AUDIO ENDPOINT ───────── */
+
+app.get('/audio', async (req, res) => {
+
+    const videoId = req.query.id;
+
+    if (!videoId) {
+        return res.status(400).json({ error: "videoId required" });
+    }
+
+    if (active >= MAX_CONCURRENT) {
+        return res.status(503).json({ error: "Server busy" });
+    }
+
+    active++;
+
+    try {
+
+        const raw = await ytdlp([
+            `https://www.youtube.com/watch?v=${videoId}`,
+            "-j"
+        ]);
+
+        const info = JSON.parse(raw);
+
+        let streamUrl = null;
+
+        if (info.formats && info.formats.length > 0) {
+
+            const audioOnly = info.formats
+                .filter(f =>
+                    f.acodec !== "none" &&
+                    (f.vcodec === "none" || !f.vcodec) &&
+                    !f.url.includes("manifest") &&
+                    !f.url.includes("playlist")
+                )
+                .sort((a, b) => (b.abr || 0) - (a.abr || 0));
+
+            if (audioOnly.length > 0) {
+                streamUrl = audioOnly[0].url;
+            }
+
+        }
+
+        if (!streamUrl) {
+            streamUrl = info.url;
+        }
+
+        if (!streamUrl) {
+            throw new Error("No audio stream found");
+        }
+
+        const cacheKey = `${videoId}:audio`;
+        cacheUrl(cacheKey, streamUrl);
+
+        const host = `${req.protocol}://${req.get("host")}`;
+
+        res.json({
+            videoId,
+            title: info.title || "",
+            duration: info.duration || 0,
+            url: `${host}/stream/${videoId}?t=audio`
+        });
+
+    }
+    catch (err) {
+
+        console.error("AUDIO ERROR:", err.message);
+        res.status(500).json({ error: err.message });
+
+    }
+    finally {
+
+        active--;
+
+    }
+
+});
+
+
 /* ───────── STREAM ENDPOINT ───────── */
 
 app.get('/stream/:videoId', (req, res) => {
 
     const videoId = req.params.videoId;
-
     const type = req.query.t || "video";
 
     const cacheKey = `${videoId}:${type}`;
-
     const sourceUrl = getCachedUrl(cacheKey);
 
-    if (!sourceUrl)
-        return res.status(410).json({ error: "Stream expired" });
+    if (!sourceUrl) {
+        return res.status(410).json({ error: "Stream expired — re-fetch required" });
+    }
 
-    const parsed = new URL(sourceUrl);
+    try {
 
-    const client = parsed.protocol === "https:" ? https : http;
+        const parsed = new URL(sourceUrl);
+        const client = parsed.protocol === "https:" ? https : http;
 
-    const headers = {
-        "User-Agent": "Mozilla/5.0"
-    };
+        const headers = {
+            "User-Agent": "Mozilla/5.0"
+        };
 
-    if (req.headers.range)
-        headers.Range = req.headers.range;
+        if (req.headers.range) {
+            headers.Range = req.headers.range;
+        }
 
-    const options = {
-        hostname: parsed.hostname,
-        port: parsed.port || 443,
-        path: parsed.pathname + parsed.search,
-        headers
-    };
+        const options = {
+            hostname: parsed.hostname,
+            port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+            path: parsed.pathname + parsed.search,
+            headers
+        };
 
-    const upstream = client.get(options, ytRes => {
+        const upstream = client.get(options, ytRes => {
 
-        res.status(ytRes.statusCode);
+            res.status(ytRes.statusCode);
 
-        ["content-type", "content-length", "content-range", "accept-ranges"]
-            .forEach(h => {
-                if (ytRes.headers[h])
-                    res.setHeader(h, ytRes.headers[h]);
+            ["content-type", "content-length", "content-range", "accept-ranges"]
+                .forEach(h => {
+                    if (ytRes.headers[h]) {
+                        res.setHeader(h, ytRes.headers[h]);
+                    }
+                });
+
+            res.setHeader("Access-Control-Allow-Origin", "*");
+
+            ytRes.pipe(res);
+
+            ytRes.on("error", () => {
+                try { res.end(); } catch (e) {}
             });
 
-        res.setHeader("Access-Control-Allow-Origin", "*");
+        });
 
-        ytRes.pipe(res);
+        upstream.on("error", err => {
 
-    });
+            console.error("STREAM ERROR:", err.message);
 
-    upstream.on("error", err => {
+            if (!res.headersSent) {
+                res.status(502).json({ error: "Upstream YouTube stream failed" });
+            }
 
-        console.error(err);
+        });
 
-        if (!res.headersSent)
-            res.status(500).json({ error: "Stream error" });
+        res.on("close", () => {
+            try { upstream.destroy(); } catch (e) {}
+        });
 
-    });
+    }
+    catch (err) {
+
+        console.error("STREAM INTERNAL ERROR:", err.message);
+
+        if (!res.headersSent) {
+            res.status(500).json({ error: "Internal stream error" });
+        }
+
+    }
 
 });
+
 
 /* ───────── HEALTH CHECK ───────── */
 
 app.get('/', (req, res) => {
 
-    res.send(`YT Backend Running | cache=${urlCache.size} | load=${active}`);
+    res.send(`YT Backend Running | cache=${urlCache.size} | load=${active}/${MAX_CONCURRENT}`);
 
 });
+
 
 /* ───────── SERVER START ───────── */
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-
-    console.log("Server running on", PORT);
-
+    console.log(`🚀 YT Backend running on port ${PORT}`);
 });
