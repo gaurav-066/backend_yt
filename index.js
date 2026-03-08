@@ -49,6 +49,7 @@ execFile("yt-dlp", ["--version"], (err, stdout) => {
 
 function ytdlp(args) {
   return new Promise((resolve, reject) => {
+
     const cookieArgs = fs.existsSync(COOKIES_FILE)
       ? ["--cookies", COOKIES_FILE]
       : [];
@@ -66,13 +67,10 @@ function ytdlp(args) {
       "--format-sort",
       "res,abr",
 
-      "--extractor-args",
-      "youtube:player_client=android",
-
       "--remote-components",
       "ejs:github",
 
-      ...args,
+      ...args
     ];
 
     execFile(
@@ -80,12 +78,15 @@ function ytdlp(args) {
       fullArgs,
       { timeout: 30000, maxBuffer: 2 * 1024 * 1024 },
       (err, stdout, stderr) => {
+
         if (err) {
           return reject(new Error(stderr || err.message));
         }
+
         resolve(stdout.trim());
       }
     );
+
   });
 }
 
