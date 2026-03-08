@@ -9,6 +9,7 @@ const path = require("path");
 const app = express();
 app.use(cors());
 
+
 /* ───────── CONFIG ───────── */
 
 const MAX_CONCURRENT = 2;
@@ -17,6 +18,13 @@ const CACHE_TTL = 3 * 60 * 60 * 1000;
 const COOKIES_FILE = path.join(__dirname, "cookies.txt");
 
 let active = 0;
+
+/* LOAD COOKIES FROM ENV */
+
+if (process.env.YT_COOKIES) {
+  fs.writeFileSync(COOKIES_FILE, process.env.YT_COOKIES);
+  console.log("Cookies loaded");
+}
 
 /* ───────── CACHE ───────── */
 
