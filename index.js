@@ -78,17 +78,17 @@ function ytdlp(args){
     ];
 
     execFile(
-      "yt-dlp",
-      fullArgs,
-      {timeout:40000,maxBuffer:10*1024*1024},
-      (err,stdout,stderr)=>{
-        if(err){
-          const line=(stderr||err.message).split("\n")[0];
-          return reject(new Error(line));
-        }
-        resolve(stdout.trim());
-      }
-    );
+  "yt-dlp",
+  fullArgs,
+  {timeout:40000,maxBuffer:10*1024*1024},
+  (err,stdout,stderr)=>{
+    if(err && !stdout){
+      const line=(stderr||err.message).split("\n")[0];
+      return reject(new Error(line));
+    }
+    resolve(stdout.trim());
+  }
+);
   });
 }
 
