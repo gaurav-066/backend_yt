@@ -66,6 +66,7 @@ function safeParse(raw) {
 
 function ytdlp(args) {
   return new Promise((resolve, reject) => {
+
     const cookieArgs = fs.existsSync(COOKIES_FILE)
       ? ["--cookies", COOKIES_FILE]
       : [];
@@ -85,9 +86,8 @@ function ytdlp(args) {
       { timeout: 40000, maxBuffer: 10 * 1024 * 1024 },
       (err, stdout, stderr) => {
 
-        if (stdout && stdout.trim().includes("{")) {
+        if (stdout && stdout.includes("{"))
           return resolve(stdout.trim());
-        }
 
         if (err) {
           const line = (stderr || err.message).split("\n")[0];
@@ -129,11 +129,26 @@ app.get("/play", async (req, res) => {
         f.url &&
         f.acodec !== "none" &&
         (!f.vcodec || f.vcodec === "none") &&
-        !f.url.includes("manifest")
+        !f.url.includes("manifest") &&
+        !f.url.includes("playlist")
       )
       .sort((a, b) => (b.abr || 0) - (a.abr || 0));
 
     if (audio.length > 0) streamUrl = audio[0].url;
+
+    if (!streamUrl) {
+      const fallback = formats
+        .filter(f =>
+          f.url &&
+          f.acodec !== "none" &&
+          !f.url.includes("manifest") &&
+          !f.url.includes("playlist")
+        )
+        .sort((a, b) => (b.abr || 0) - (a.abr || 0));
+
+      if (fallback.length > 0) streamUrl = fallback[0].url;
+    }
+
     if (!streamUrl) streamUrl = info.url;
 
     if (!streamUrl) throw new Error("No audio stream found");
@@ -192,11 +207,13 @@ app.get("/video", async (req, res) => {
         f.vcodec !== "none" &&
         f.ext === "mp4" &&
         (f.height || 0) <= 480 &&
-        !f.url.includes("manifest")
+        !f.url.includes("manifest") &&
+        !f.url.includes("playlist")
       )
       .sort((a, b) => (b.height || 0) - (a.height || 0));
 
     if (mp4.length > 0) streamUrl = mp4[0].url;
+
     if (!streamUrl) streamUrl = info.url;
 
     if (!streamUrl) throw new Error("No video stream found");
@@ -267,6 +284,10 @@ app.get("/stream/:id", (req, res) => {
   upstream.on("error", () => {
     if (!res.headersSent)
       res.status(500).json({ error: "Stream failed" });
+  });
+
+  res.on("close", () => {
+    upstream.destroy();
   });
 });
 
