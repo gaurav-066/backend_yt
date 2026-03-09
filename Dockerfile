@@ -1,27 +1,18 @@
-FROM node:18-slim
+FROM nikolaik/python-nodejs:python3.11-nodejs20
 
-# Install python3, pip, curl, unzip
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip curl unzip && \
-    pip3 install --break-system-packages yt-dlp && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# System deps
+RUN apt-get update && apt-get install -y ffmpeg curl && rm -rf /var/lib/apt/lists/*
 
-# Install Deno (required for YouTube signature solving / EJS plugin)
-RUN curl -fsSL https://deno.land/install.sh | sh
-ENV DENO_DIR="/root/.deno"
-ENV PATH="${DENO_DIR}/bin:${PATH}"
+# Install latest yt-dlp binary
+RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+    -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp
 
-RUN yt-dlp --version
+WORKDIR /usr/src/app
 
-WORKDIR /app
-
-COPY package*.json ./
-RUN npm install --production
+COPY package.json ./
+RUN npm install
 
 COPY . .
 
-ENV NODE_OPTIONS="--max-old-space-size=400"
-
 EXPOSE 3000
-
 CMD ["node", "index.js"]
