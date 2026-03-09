@@ -31,6 +31,8 @@ const MAX_CONCURRENT = 2;
 function run(cmd) {
   return new Promise((resolve, reject) => {
     exec(cmd, { timeout: 50000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      // If stdout has JSON, use it even if there were warnings (non-zero exit)
+      if (stdout && stdout.includes("{")) return resolve(stdout.trim());
       if (err) return reject(new Error((stderr || err.message).split("\n")[0]));
       if (!stdout || !stdout.trim()) return reject(new Error("Empty output from yt-dlp"));
       resolve(stdout.trim());
@@ -67,6 +69,7 @@ app.get("/resolve", async (req, res) => {
       "--no-playlist",
       "--no-warnings",
       "--no-check-certificates",
+      "--no-warnings",
       cookieArg
     ].filter(Boolean).join(" ");
 
