@@ -53,7 +53,7 @@ function getCachedUrl(key) {
   return entry.url;
 }
 
-/* SAFE JSON PARSE */
+/* SAFE JSON PARSER */
 
 function safeParse(raw) {
   const start = raw.indexOf("{");
@@ -61,7 +61,7 @@ function safeParse(raw) {
   return JSON.parse(raw.slice(start));
 }
 
-/* yt-dlp wrapper */
+/* yt-dlp WRAPPER */
 
 function ytdlp(args) {
   return new Promise((resolve, reject) => {
@@ -95,6 +95,7 @@ function ytdlp(args) {
         resolve(stdout.trim());
       }
     );
+
   });
 }
 
@@ -122,22 +123,18 @@ app.get("/video", async (req, res) => {
     const formats = info.formats || [];
     let streamUrl = null;
 
-    /* pick first playable video */
+    /* pick first available stream */
 
-    const playable = formats
-      .filter(f =>
-        f.url &&
-        f.vcodec !== "none" &&
-        !f.url.includes("manifest") &&
-        !f.url.includes("playlist")
-      )
-      .sort((a,b)=>(b.height||0)-(a.height||0));
+    for (const f of formats) {
+      if (f.url && !f.url.includes("manifest")) {
+        streamUrl = f.url;
+        break;
+      }
+    }
 
-    if (playable.length > 0)
-      streamUrl = playable[0].url;
+    /* fallback */
 
-    if (!streamUrl)
-      streamUrl = info.url;
+    if (!streamUrl) streamUrl = info.url;
 
     if (!streamUrl)
       throw new Error("No video stream found");
@@ -198,25 +195,26 @@ app.get("/stream/:id", (req, res) => {
     res.status(yt.statusCode);
 
     ["content-type","content-length","content-range","accept-ranges"]
-      .forEach(h=>{
+      .forEach(h => {
         if (yt.headers[h]) res.setHeader(h, yt.headers[h]);
       });
 
     res.setHeader("Access-Control-Allow-Origin","*");
 
     yt.pipe(res);
+
   });
 
-  upstream.on("error",()=>{
+  upstream.on("error", () => {
     if (!res.headersSent)
-      res.status(500).json({ error:"Stream failed" });
+      res.status(500).json({ error: "Stream failed" });
   });
 
 });
 
 /* HEALTH */
 
-app.get("/", (req,res)=>{
+app.get("/", (req, res) => {
   res.send(`YT backend running | cache=${urlCache.size}`);
 });
 
@@ -224,6 +222,6 @@ app.get("/", (req,res)=>{
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, ()=>{
+app.listen(PORT, () => {
   console.log("Backend running on", PORT);
 });
