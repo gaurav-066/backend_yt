@@ -33,7 +33,8 @@ function run(cmd) {
     exec(cmd, { timeout: 50000, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
       const out = (stdout || "").trim();
       if (out) return resolve(out);
-      reject(new Error((stderr || err?.message || "Empty output").split("\n").find(l => l.includes("ERROR")) || (stderr || err?.message || "Empty output")));
+      const errMsg = (stderr || err?.message || "Empty output");
+      reject(new Error(errMsg.split("\n").find(l => l.includes("ERROR")) || errMsg));
     });
   });
 }
@@ -44,9 +45,6 @@ app.get("/", (req, res) => {
 });
 
 // ── /resolve ─────────────────────────────────────────────────────────────────
-// Takes videoId, returns audioUrl + videoUrl.
-// Uses -g flag (URL only) — much lighter than --dump-single-json.
-// Two parallel calls so it's fast.
 app.get("/resolve", async (req, res) => {
   const { id } = req.query;
 
@@ -59,27 +57,25 @@ app.get("/resolve", async (req, res) => {
   active++;
   const ytUrl = `https://youtube.com/watch?v=${id}`;
 
-  const base = [
-    "yt-dlp",
-    `"${ytUrl}"`,
-    "--no-playlist",
-    "--no-warnings",
-    "--no-check-certificates",
-    "-g",            // just print the URL, nothing else
-    cookieArg
-  ].filter(Boolean).join(" ");
+  // Base args — NO explicit -f flag, let yt-dlp pick whatever YouTube serves
+  const base = `yt-dlp "${ytUrl}" --no-playlist --no-warnings --no-check-certificates ${cookieArg}`;
 
   try {
-    // Run audio + video resolution in parallel
-    const [audioUrl, videoUrl] = await Promise.all([
-      run(`${base} -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best"`),
-      run(`${base} -f "best[height<=480][ext=mp4]/best[height<=480]/best[ext=mp4]/best"`)
-    ]);
+    // Single call, get best available URL — no format restrictions
+    const audioUrl = await run(`${base} -f "bestaudio" -g`);
+
+    // For video try low res, fallback to same as audio
+    let videoUrl = audioUrl;
+    try {
+      videoUrl = await run(`${base} -f "worstvideo+worstaudio/worst" -g`);
+    } catch (_) {
+      // fine, just use audio url for video too
+    }
 
     res.json({
       videoId:   id,
       thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
-      audioUrl:  audioUrl.split("\n")[0],  // -g can return multiple lines, take first
+      audioUrl:  audioUrl.split("\n")[0],
       videoUrl:  videoUrl.split("\n")[0]
     });
 
