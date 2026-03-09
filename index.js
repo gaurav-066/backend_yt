@@ -12,7 +12,6 @@ app.use(cors());
 /* CONFIG */
 
 const MAX_CONCURRENT = 2;
-const MAX_VIDEO_DURATION = 420;
 const CACHE_TTL = 3 * 60 * 60 * 1000;
 const COOKIES_FILE = path.join(__dirname, "cookies.txt");
 
@@ -74,7 +73,6 @@ function ytdlp(args) {
     const fullArgs = [
       ...cookieArgs,
       "--no-warnings",
-      "--no-playlist",
       "--skip-download",
       "--dump-single-json",
       ...args
@@ -104,80 +102,7 @@ function ytdlp(args) {
 
 let active = 0;
 
-/* AUDIO ENDPOINT */
-
-app.get("/play", async (req, res) => {
-
-  const query = req.query.q;
-  if (!query) return res.status(400).json({ error: "Query required" });
-
-  if (active >= MAX_CONCURRENT)
-    return res.status(503).json({ error: "Server busy" });
-
-  active++;
-
-  try {
-
-    const raw = await ytdlp([`ytsearch1:${query}`]);
-    const info = safeParse(raw);
-
-    const formats = info.formats || [];
-    let streamUrl = null;
-
-    const audio = formats
-      .filter(f =>
-        f.url &&
-        f.acodec !== "none" &&
-        (!f.vcodec || f.vcodec === "none") &&
-        !f.url.includes("manifest") &&
-        !f.url.includes("playlist")
-      )
-      .sort((a, b) => (b.abr || 0) - (a.abr || 0));
-
-    if (audio.length > 0) streamUrl = audio[0].url;
-
-    if (!streamUrl) {
-      const fallback = formats
-        .filter(f =>
-          f.url &&
-          f.acodec !== "none" &&
-          !f.url.includes("manifest") &&
-          !f.url.includes("playlist")
-        )
-        .sort((a, b) => (b.abr || 0) - (a.abr || 0));
-
-      if (fallback.length > 0) streamUrl = fallback[0].url;
-    }
-
-    if (!streamUrl) streamUrl = info.url;
-
-    if (!streamUrl) throw new Error("No audio stream found");
-
-    cacheUrl(`${info.id}:audio`, streamUrl);
-
-    const host = `${req.protocol}://${req.get("host")}`;
-
-    res.json({
-      videoId: info.id,
-      title: info.title,
-      artist: info.channel || info.uploader || "",
-      duration: info.duration || 0,
-      thumbnail: info.thumbnail,
-      url: `${host}/stream/${info.id}?t=audio`
-    });
-
-  } catch (e) {
-
-    res.status(500).json({ error: e.message });
-
-  } finally {
-
-    active--;
-
-  }
-});
-
-/* VIDEO ENDPOINT */
+/* VIDEO SEARCH */
 
 app.get("/video", async (req, res) => {
 
@@ -194,31 +119,30 @@ app.get("/video", async (req, res) => {
     const raw = await ytdlp([`ytsearch1:${query}`]);
     const info = safeParse(raw);
 
-    if (info.duration && info.duration > MAX_VIDEO_DURATION)
-      return res.status(204).end();
-
     const formats = info.formats || [];
     let streamUrl = null;
 
-    const mp4 = formats
+    /* pick first playable video */
+
+    const playable = formats
       .filter(f =>
         f.url &&
-        f.acodec !== "none" &&
         f.vcodec !== "none" &&
-        f.ext === "mp4" &&
-        (f.height || 0) <= 480 &&
         !f.url.includes("manifest") &&
         !f.url.includes("playlist")
       )
-      .sort((a, b) => (b.height || 0) - (a.height || 0));
+      .sort((a,b)=>(b.height||0)-(a.height||0));
 
-    if (mp4.length > 0) streamUrl = mp4[0].url;
+    if (playable.length > 0)
+      streamUrl = playable[0].url;
 
-    if (!streamUrl) streamUrl = info.url;
+    if (!streamUrl)
+      streamUrl = info.url;
 
-    if (!streamUrl) throw new Error("No video stream found");
+    if (!streamUrl)
+      throw new Error("No video stream found");
 
-    cacheUrl(`${info.id}:video`, streamUrl);
+    cacheUrl(info.id, streamUrl);
 
     const host = `${req.protocol}://${req.get("host")}`;
 
@@ -226,7 +150,8 @@ app.get("/video", async (req, res) => {
       videoId: info.id,
       title: info.title,
       duration: info.duration,
-      url: `${host}/stream/${info.id}?t=video`
+      thumbnail: info.thumbnail,
+      url: `${host}/stream/${info.id}`
     });
 
   } catch (e) {
@@ -238,6 +163,7 @@ app.get("/video", async (req, res) => {
     active--;
 
   }
+
 });
 
 /* STREAM PROXY */
@@ -245,10 +171,10 @@ app.get("/video", async (req, res) => {
 app.get("/stream/:id", (req, res) => {
 
   const id = req.params.id;
-  const type = req.query.t || "audio";
+  const source = getCachedUrl(id);
 
-  const source = getCachedUrl(`${id}:${type}`);
-  if (!source) return res.status(410).json({ error: "Stream expired" });
+  if (!source)
+    return res.status(410).json({ error: "Stream expired" });
 
   const parsed = new URL(source);
   const client = parsed.protocol === "https:" ? https : http;
@@ -272,7 +198,7 @@ app.get("/stream/:id", (req, res) => {
     res.status(yt.statusCode);
 
     ["content-type","content-length","content-range","accept-ranges"]
-      .forEach(h => {
+      .forEach(h=>{
         if (yt.headers[h]) res.setHeader(h, yt.headers[h]);
       });
 
@@ -281,19 +207,16 @@ app.get("/stream/:id", (req, res) => {
     yt.pipe(res);
   });
 
-  upstream.on("error", () => {
+  upstream.on("error",()=>{
     if (!res.headersSent)
-      res.status(500).json({ error: "Stream failed" });
+      res.status(500).json({ error:"Stream failed" });
   });
 
-  res.on("close", () => {
-    upstream.destroy();
-  });
 });
 
 /* HEALTH */
 
-app.get("/", (req, res) => {
+app.get("/", (req,res)=>{
   res.send(`YT backend running | cache=${urlCache.size}`);
 });
 
@@ -301,6 +224,6 @@ app.get("/", (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log("Backend running on port", PORT);
+app.listen(PORT, ()=>{
+  console.log("Backend running on", PORT);
 });
