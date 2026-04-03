@@ -1,14 +1,21 @@
 {
-    "name": "vybzz-backend-yt",
-    "version": "5.0.0",
-    "description": "VYBZZ YouTube backend — yt-dlp search + pipe proxy streaming",
-    "main": "index.js",
-    "scripts": {
-        "build": "curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ./yt-dlp && chmod +x ./yt-dlp",
-        "start": "node index.js"
-    },
-    "dependencies": {
-        "cors": "^2.8.5",
-        "express": "^4.18.2"
-    }
+  "name": "vybzz-backend",
+  "version": "2.0.0",
+  "description": "Fast YouTube backend using youtubei.js innertube",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "youtubei.js": "^9.1.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
