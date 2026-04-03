@@ -45,9 +45,8 @@ async function getYT() {
     if (!yt) {
         console.log('🔧 Initializing Innertube...');
         yt = await Innertube.create({
-            cache: true,
-            generate_session_locally: true,
-        });
+    generate_session_locally: true,
+});
         console.log('✅ Innertube ready!');
     }
     return yt;
